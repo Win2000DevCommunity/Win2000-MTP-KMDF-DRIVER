@@ -1,0 +1,213 @@
+; MTP sample driver INF - KMDF 1.9 for Windows 2000 SP4+
+; KMDF 1.9 officially supports Windows 2000 (KB970158)
+; See: https://support.microsoft.com/kb/970158
+;
+; Copyright (c) Microsoft Corporation. All rights reserved.
+
+[Version]
+Signature="$CHICAGO$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%ProviderName%
+DriverVer=02/01/2026,2.0.0.1
+CatalogFile=mtp.cat
+
+; ==================== Manufacturer Section ====================
+; Windows 2000 requires an UNDECORATED Models section!
+; Decorated sections (.NT, .NT.5.1) are NOT supported by Windows 2000
+[Manufacturer]
+%MfgName%=MfgSection
+
+; Undecorated Models section - REQUIRED for Windows 2000
+; Windows 2000 ignores all decorated sections like .NT, .NTx86, etc.
+[MfgSection]
+; ---- PTP/MTP Class devices (Still Image Class 0x06) ----
+; This matches cameras, phones in PTP/MTP mode
+%DeviceDesc%=MtpInstall, USB\CLASS_06&SUBCLASS_01&PROT_01
+%DeviceDesc%=MtpInstall, USB\CLASS_06&SUBCLASS_01
+%DeviceDesc%=MtpInstall, USB\CLASS_06
+
+; ---- Common Phone Manufacturers (MTP mode) ----
+; Samsung Galaxy series
+%DeviceDesc%=MtpInstall, USB\VID_04E8&PID_6860
+%DeviceDesc%=MtpInstall, USB\VID_04E8&PID_6865
+%DeviceDesc%=MtpInstall, USB\VID_04E8&PID_685C
+; Google/Android devices
+%DeviceDesc%=MtpInstall, USB\VID_18D1&PID_4EE1
+%DeviceDesc%=MtpInstall, USB\VID_18D1&PID_4EE2
+; LG phones
+%DeviceDesc%=MtpInstall, USB\VID_1004&PID_631C
+; HTC phones
+%DeviceDesc%=MtpInstall, USB\VID_0BB4&PID_0C02
+; Sony phones
+%DeviceDesc%=MtpInstall, USB\VID_0FCE&PID_01A5
+; Motorola phones
+%DeviceDesc%=MtpInstall, USB\VID_22B8&PID_2E82
+; Huawei phones  
+%DeviceDesc%=MtpInstall, USB\VID_12D1&PID_107E
+; Xiaomi phones
+%DeviceDesc%=MtpInstall, USB\VID_2717&PID_FF40
+; OnePlus phones
+%DeviceDesc%=MtpInstall, USB\VID_2A70&PID_9011
+; Apple (PTP mode for photos)
+%DeviceDesc%=MtpInstall, USB\VID_05AC&PID_12A8
+
+; ---- Digital Cameras (PTP) ----
+; Canon cameras
+%DeviceDesc%=MtpInstall, USB\VID_04A9&PID_3218
+; Nikon cameras
+%DeviceDesc%=MtpInstall, USB\VID_04B0&PID_0428
+; Sony cameras
+%DeviceDesc%=MtpInstall, USB\VID_054C&PID_004E
+
+; ==================== Destination Directories ====================
+[DestinationDirs]
+DefaultDestDir = 12                ; %windir%\system32\drivers
+MtpCopyFiles = 12                  ; %windir%\system32\drivers
+CoInstallers_CopyFiles = 11        ; %windir%\system32
+
+; ==================== Source Disk Information ====================
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+mtp.sys=1,,
+WdfCoInstaller01009.dll=1,,
+
+; ==================== Installation Section ====================
+; UNDECORATED section required for Windows 2000!
+; Win2000 SetupAPI ignores .NT, .NTx86, .NT.5.1 sections completely
+[MtpInstall]
+CopyFiles = MtpCopyFiles
+AddReg = MtpAddReg
+
+[MtpCopyFiles]
+mtp.sys,,,0x00004000  ; COPYFLG_IN_USE_RENAME
+
+; ==================== Registry Settings ====================
+[MtpAddReg]
+; Device characteristics
+HKR,,DeviceCharacteristics,0x10001,0x00000100  ; FILE_DEVICE_SECURE_OPEN
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"  ; Security descriptor
+
+; Device interface registration
+HKR,,DeviceInterfaceGUIDs,0x10000,"{6AC27878-A6FA-4155-BA85-F98F491D4F33}"
+
+; Power management settings
+HKR,,DeviceSelectiveSuspendEnabled,0x00010001,1
+HKR,,SystemWakeEnabled,0x00010001,1
+HKR,,DeviceRemoteWakeEnabled,0x00010001,1
+
+; Device properties
+HKR,,FriendlyName,,%DeviceDesc%
+HKR,,Icon,,-5
+HKR,,NoSetupUI,,1
+
+; Performance and optimization
+HKR,,MaximumTransferSize,0x10001,0x00010000
+HKR,,MaximumIdleTime,0x10001,5000
+
+; Debug and logging (set to 0 for production)
+HKR,"Parameters","DebugLevel",0x10001,3
+HKR,"Parameters","DebugFlags",0x10001,0xFFFFFFFF
+
+; ==================== Service Installation ====================
+; UNDECORATED section required for Windows 2000!
+[MtpInstall.Services]
+AddService = Mtp, 0x00000002, Mtp_Service_Inst, Mtp_EventLog_Inst
+
+[Mtp_Service_Inst]
+DisplayName    = %ServiceName%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\mtp.sys
+LoadOrderGroup = Base
+
+; Service registry settings
+AddReg = Mtp_Service_AddReg
+
+[Mtp_Service_AddReg]
+HKR,"Parameters","VerboseOn",0x00010001,0
+HKR,"Parameters","BreakOnEntry",0x00010001,0
+HKR,"Parameters","DebugLevel",0x00010001,3
+
+; ==================== Event Log Installation ====================
+[Mtp_EventLog_Inst]
+AddReg = Mtp_EventLog_AddReg
+
+[Mtp_EventLog_AddReg]
+HKR,,EventMessageFile,0x00020000,"%%SystemRoot%%\System32\IoLogMsg.dll;%%SystemRoot%%\System32\drivers\mtp.sys"
+HKR,,TypesSupported,0x00010001,7
+
+; ==================== Hardware Settings ====================
+; UNDECORATED section required for Windows 2000!
+[MtpInstall.HW]
+AddReg = MtpHwAddReg
+
+[MtpHwAddReg]
+; Device interface settings
+HKR,,SurpriseRemovalOK,0x00010001,1
+HKR,,EnumeratorClass,0x00010001,2
+
+; USB specific settings
+HKR,,SelectiveSuspendEnabled,0x00010001,1
+HKR,,SelectiveSuspendTimeout,0x00010001,10000
+
+; Performance settings
+HKR,,MaximumTransferSize,0x10001,65536
+HKR,,DefaultPipeTimeout,0x10001,5000
+
+; ==================== WDF CoInstaller Section ====================
+; KMDF 1.9 is supported on Windows 2000 via KB970158
+; UNDECORATED section required for Windows 2000!
+[MtpInstall.CoInstallers]
+AddReg = CoInstallers_AddReg
+CopyFiles = CoInstallers_CopyFiles
+
+[CoInstallers_CopyFiles]
+WdfCoInstaller01009.dll
+
+[CoInstallers_AddReg]
+HKR,,CoInstallers32,0x00010000,"WdfCoInstaller01009.dll,WdfCoInstaller"
+
+; ==================== WDF Section ====================
+; UNDECORATED section required for Windows 2000!
+[MtpInstall.Wdf]
+KmdfService = Mtp, Mtp_wdfsect
+
+[Mtp_wdfsect]
+KmdfLibraryVersion = 1.9
+
+; ==================== Interface Installation ====================
+; UNDECORATED section required for Windows 2000!
+[MtpInstall.Interfaces]
+AddInterface = {6AC27878-A6FA-4155-BA85-F98F491D4F33},"REFERENCE",MtpInterface
+
+[MtpInterface]
+AddReg = MtpInterface.AddReg
+
+[MtpInterface.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%DeviceDesc%
+
+; ==================== Strings Section ====================
+[Strings]
+; Provider information
+ProviderName = "MTP Vendor"
+MfgName = "MTP KMDF Compatible Vendor"
+
+; Device descriptions
+DeviceDesc = "MTP Device (KMDF 1.9 - Win2000 Compatible)"
+ServiceName = "MTP KMDF Driver Service"
+ServiceDesc = "MTP Media Transfer Protocol Driver for Windows 2000/XP/Vista/7"
+
+; Installation information
+DiskName = "MTP KMDF Installation Disk"
+
+; Interface CLSID
+Proxy.CLSID = "{17efefc1-c7ed-423d-b606-43f5d2e40c3f}"
+
+; Localizable strings
+ClassName = "USB Device"
+DeviceClassDesc = "USB Device Class"

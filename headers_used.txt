@@ -1,0 +1,46 @@
+Headers referenced/used in this project (Windows 2000 + KMDF 1.9):
+
+KMDF 1.9 headers (used for KMDF/WDF APIs):
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\7600.16385.1\inc\wdf\kmdf\1.9\wdf.h
+  - Common symbols used: WdfDriverCreate, WdfDeviceCreate, WdfIoQueueCreate, WdfRequestRetrieveInputBuffer, WdfRequestRetrieveOutputBuffer, WdfRequestComplete, WdfRequestCompleteWithInformation, WDF_OBJECT_ATTRIBUTES_INIT, WdfSpinLockCreate
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\7600.16385.1\inc\wdf\kmdf\1.9\wdfdriver.h
+  - Common symbols used: Driver-level types and creation APIs (pulled in via wdf.h)
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\7600.16385.1\inc\wdf\kmdf\1.9\wdfusb.h
+  - Common symbols used: WdfUsbTargetDeviceCreate, WdfUsbTargetDeviceGetInterface, WdfUsbTargetPipeGetInformation, WdfUsbTargetPipeConfigContinuousReader, WdfUsbTargetPipeFormatRequestForWrite, WDF_USB_CONTINUOUS_READER_CONFIG_INIT
+
+W2K / DDK USB and USBD headers (W2K-only, used for USB structures and IOCTLs):
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2k\usbdi.h
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2k\usbioctl.h
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2k\usb100.h
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\ddk\wdm\w2k\usbdlib.h
+
+Common kernel headers (from W2K include tree):
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\ddk\w2k\ntddk.h
+- ntstatus.h
+- windef.h
+- winerror.h
+
+User-mode test headers (from workspace '2000 sdk'):
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\2000 sdk\Include\Windows.h
+- c:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\2000 sdk\Include\WinIoCtl.h
+- c runtime headers: `stdio.h`, `stdlib.h` (from the 2000 SDK include tree)
+
+Common symbols used by the test app (from the 2000 SDK headers): CreateFileA, DeviceIoControl, CloseHandle, GetLastError, printf, malloc, free
+
+Notes:
+- KMDF headers (WDF) are the 1.9 versions and are taken from the KMDF 1.9 include tree.
+- All non-KMDF USB/USBD/WDK headers used by this project are taken from the `3790.1830` (Windows 2000) include tree only (e.g., `usbdi.h`, `usbioctl.h`, `usb100.h`, `usbdlib.h`).
+- Ensure you build the driver using the W2K DDK environment (`setenv.bat` / appropriate target) so the compiler picks these W2K headers first.
+
+Editor & tooling notes:
+- For Visual Studio Code, the project now includes `.vscode/c_cpp_properties.json` configured to prioritize the Windows 2000 include folders (see `3790.1830/inc/w2k`, `3790.1830/inc/ddk/w2k`, and `3790.1830/inc/crt`) and the KMDF 1.9 WDF headers for WDF APIs. This prevents Ctrl+Click resolving kernel headers from the newer `7600` SDK.
+- A small editor-only shim (`.vscode/vs_compat_sal.h`) is forced into IntelliSense to provide minimal SAL annotation fallbacks (e.g., `_In_`, `_Out_`) so the editor doesn't produce spurious errors. This shim is only for editor/IntelliSense and does not change the actual driver build.
+- The repository also includes `src/mtp_kmdf_w2k/check_include.bat` to help verify that the W2K `3790.1830` include paths are present in your `INCLUDE` environment variable prior to building.
+
+Editor note:
+- If your editor (Ctrl+Click) opens headers under `7600.16385.1` instead of `3790.1830`, the editor/IntelliSense include path prefers the newer SDK. Run `check_include.bat` in this driver folder to verify your %%INCLUDE%% and confirm that `3790.1830` appears (and appears BEFORE any `7600.16385.1` entries).
+- For Visual Studio Code: create or update `.vscode/c_cpp_properties.json` so the include paths list the Windows 2000 include folders first, for example:
+  - `${workspaceFolder}/3790.1830/inc/w2k`
+  - `${workspaceFolder}/7600.16385.1/inc/wdf/kmdf/1.9`  (KMDF 1.9 headers)
+  Ensuring this order makes Intellisense resolve kernel/USB headers from W2K while KMDF APIs come from KMDF 1.9.
+- The `user\build_test.bat` enforces the `2000 sdk` for the user-mode test; always run the W2K DDK `setenv.bat` before building the driver to guarantee the correct header set is used.

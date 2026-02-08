@@ -1,0 +1,32 @@
+MUI_386_OBJECTS=
+
+386_OBJECTS= \
+    $(_OBJ_DIR)\i386\driver.obj \
+    $(_OBJ_DIR)\i386\device.obj \
+    $(_OBJ_DIR)\i386\usb.obj \
+    $(_OBJ_DIR)\i386\mtp.obj
+
+MUI_IA64_OBJECTS=
+
+IA64_OBJECTS= \
+    $(_OBJ_DIR)\ia64\driver.obj \
+    $(_OBJ_DIR)\ia64\device.obj \
+    $(_OBJ_DIR)\ia64\usb.obj \
+    $(_OBJ_DIR)\ia64\mtp.obj
+
+MUI_AMD64_OBJECTS=
+
+AMD64_OBJECTS= \
+    $(_OBJ_DIR)\amd64\driver.obj \
+    $(_OBJ_DIR)\amd64\device.obj \
+    $(_OBJ_DIR)\amd64\usb.obj \
+    $(_OBJ_DIR)\amd64\mtp.obj
+
+MUI_ARM_OBJECTS=
+
+ARM_OBJECTS= \
+    $(_OBJ_DIR)\arm\driver.obj \
+    $(_OBJ_DIR)\arm\device.obj \
+    $(_OBJ_DIR)\arm\usb.obj \
+    $(_OBJ_DIR)\arm\mtp.obj
+

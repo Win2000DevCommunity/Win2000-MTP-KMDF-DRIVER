@@ -1,0 +1,26 @@
+TARGETNAME=mtp
+TARGETTYPE=DRIVER
+TARGETPATH=obj
+DRIVERTYPE=WDM
+
+KMDF_VERSION_MAJOR=1
+KMDF_VERSION_MINOR=9
+
+# Include paths - Windows 2000 DDK headers + KMDF 1.9
+INCLUDES=$(BASEDIR)\inc\ddk\w2k;$(BASEDIR)\inc\w2k;$(BASEDIR)\inc\crt;..\..\..\7600.16385.1\inc\wdf\kmdf\1.9;.
+
+TARGETLIBS=$(DDK_LIB_PATH)\wdm.lib \
+           $(DDK_LIB_PATH)\ntstrsafe.lib \
+           $(DDK_LIB_PATH)\usbd.lib \
+           ..\..\..\7600.16385.1\lib\wdf\kmdf\i386\1.9\WdfDriverEntry.lib \
+           ..\..\..\7600.16385.1\lib\wdf\kmdf\i386\1.9\WdfLdr.lib
+
+C_DEFINES=-DWIN2000 -DWDF_1_9_BUILD -D_WIN32_WINNT=0x0500 -DNTDDI_VERSION=0x05000000
+
+# Disable buffer security checks - not available in Windows 2000
+MSC_OPTIMIZATION=/GS-
+
+MSC_WARNING_LEVEL=/W3 /WX-
+
+SOURCES=Driver.c Device.c Usb.c Mtp.c security_stub.c
+

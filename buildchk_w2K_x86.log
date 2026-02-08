@@ -1,0 +1,68 @@
+BUILD: Examining c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k directory for files to compile.
+Compiling (NoSync) c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k directory ********************
+1>'nmake.exe /nologo BUILDMSG=Stop. -i NTTEST= UMTEST= NOLINK=1 PASS1_NOLIB=1 386=1'
+1>BUILDMSG: Processing c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k
+1>cl -nologo -Ii386\ -I. -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\mfc42 -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\ddk\w2k -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2k -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\crt -I..\..\..\7600.16385.1\inc\wdf\kmdf\1.9 -I. -Iobjchk_w2K_x86\i386 -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2K -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2K -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\ddk\wdm\w2K -IC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\crt -D_X86_=1 -Di386=1  -DSTD_CALL -DCONDITION_HANDLING=1   -DNT_INST=0 -DWIN32=100 -D_NT1X_=100 -DWINNT=1 -D_WIN32_WINNT=0x0500 /DWINVER=0x0500 -D_WIN32_IE=0x0501    -DWIN32_LEAN_AND_MEAN=1 -DDEVL=1 -DDBG=1 -D__BUILDMACHINE__=WinDDK -DFPO=0  -DNDEBUG -D_DLL=1 -DWIN2000 -DWDF_1_9_BUILD -D_WIN32_WINNT=0x0500 -DNTDDI_VERSION=0x05000000     /c /Zl /Zp8 /Gy /Gm- -cbstring /W3 /WX- /WX /Gz  /GX-  /GR- /GF /GS /G6 /Ze /Gi- /QIfdiv- /hotpatch -Z7 /GS-  /Oy-   -FIC:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\inc\w2K\warning.h   .\driver.c .\device.c .\usb.c .\mtp.c .\security_stub.c 
+1>cl : Command line warning D4025 : overriding '/WX-' with '/WX'
+1>cl : Command line warning D4002 : ignoring unknown option '/G-'
+1>driver.c
+1>device.c
+1>usb.c
+1>mtp.c
+1>security_stub.c
+1>Generating Code...
+1>
+1>Stop.
+Compiling  c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k directory ********************
+100>'nmake.exe /nologo BUILDMSG=Stop. -i NTTEST= UMTEST= NOLINK=1 386=1'
+100>BUILDMSG: Processing c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k
+100>
+100>Stop.
+Linking c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k directory ********************
+1>'nmake.exe /nologo BUILDMSG=Stop. -i LINKONLY=1 NOPASS0=1 NTTEST= UMTEST= 386=1'
+1>BUILDMSG: Processing c:\users\win2000\downloads\winddk-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\src\mtp_kmdf_w2k
+1>	link -out:objchk_w2K_x86\i386\mtp.sys -machine:ix86 @C:\Users\win2000\AppData\Local\Temp\nmBF25.tmp
+1>Microsoft (R) Incremental Linker Version 7.10.4035
+1>Copyright (C) Microsoft Corporation.  All rights reserved.
+1>
+1>-MERGE:_PAGE=PAGE 
+1>-MERGE:_TEXT=.text 
+1>-SECTION:INIT,d 
+1>-OPT:REF 
+1>-OPT:ICF 
+1>-IGNORE:4198,4010,4037,4039,4065,4070,4078,4087,4089,4221 
+1>-INCREMENTAL:NO 
+1>-FULLBUILD 
+1>/release 
+1>-NODEFAULTLIB 
+1>/WX 
+1>-debug 
+1>-debugtype:cv 
+1>-version:5.0 
+1>-osversion:5.0 
+1>/functionpadmin:5 
+1>/pdbcompress 
+1>-STACK:0x40000,0x1000 
+1>-driver -driver:wdm 
+1>-base:0x10000 
+1>-align:0x80 /stub:C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\stub512.com 
+1>-subsystem:native,1.10 
+1>-entry:GsDriverEntry@8 
+1>-out:objchk_w2K_x86\i386\mtp.sys 
+1>objchk_w2K_x86\i386\driver.obj 
+1>objchk_w2K_x86\i386\device.obj 
+1>objchk_w2K_x86\i386\usb.obj 
+1>objchk_w2K_x86\i386\mtp.obj 
+1>objchk_w2K_x86\i386\security_stub.obj 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\BufferOverflowK.lib 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\wdm.lib 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\wdm.lib 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\ntstrsafe.lib 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\usbd.lib 
+1>..\..\..\7600.16385.1\lib\wdf\kmdf\i386\1.9\WdfDriverEntry.lib 
+1>..\..\..\7600.16385.1\lib\wdf\kmdf\i386\1.9\WdfLdr.lib 
+1>C:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\lib\w2K\i386\sehupd.lib 
+1>	echo Skip Binplace:
+1>Skip Binplace:
+1>
+1>Stop.

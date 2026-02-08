@@ -1,0 +1,484 @@
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+   EnableRedirectToChakraJsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.484 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 46
+
+Microsoft (R) Windows Debugger Version 10.0.29507.1001 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Users\Win2000\Desktop\Mini020426-01.dmp]
+Mini Kernel Dump File: Only registers and stack trace are available
+
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+Symbol search path is: srv*
+Executable search path is: 
+Unable to load image ntoskrnl.exe, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ntoskrnl.exe
+Windows 2000 Kernel Version 2195 (Service Pack 4) MP (2 procs) Free x86 compatible
+Kernel base = 0x80400000 PsLoadedModuleList = 0x80485b00
+Debug session time: Wed Feb  4 22:03:20.998 2026 (UTC + 1:00)
+System Uptime: not available
+Unable to load image ntoskrnl.exe, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ntoskrnl.exe
+Loading Kernel Symbols
+.
+
+Press ctrl-c (cdb, kd, ntsd) or ctrl-break (windbg) to abort symbol loads that take too long.
+Run !sym noisy before .reload to track down problems loading symbols.
+
+..............................................................
+..................................
+Loading User Symbols
+Loading unloaded module list
+................
+
+************* Symbol Loading Error Summary **************
+Module name            Error
+ntoskrnl               The system cannot find the file specified
+
+You can troubleshoot most symbol related issues by turning on symbol loading diagnostics (!sym noisy) and repeating the command that caused symbols to be loaded.
+You should also verify that your symbol search path (.sympath) is correct.
+Unable to add extension DLL: kdextx86
+For analysis of this file, run !analyze -v
+eax=ffdff13c ebx=0000001e ecx=00000000 edx=8046cf76 esi=00000000 edi=804065b8
+eip=804577de esp=f204b414 ebp=f204bddc iopl=0         nv up ei ng nz na pe nc
+cs=0008  ss=0010  ds=0023  es=0023  fs=0030  gs=0000             efl=00000286
+nt+0x577de:
+804577de ??              ???
+0: kd> .sympath C:\Users\Win2000\Desktop\Windows2000Debugging\Symbols
+Symbol search path is: C:\Users\Win2000\Desktop\Windows2000Debugging\Symbols
+Expanded Symbol search path is: c:\users\win2000\desktop\windows2000debugging\symbols
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             C:\Users\Win2000\Desktop\Windows2000Debugging\Symbols
+0: kd> .reload 
+Unable to load image ntoskrnl.exe, Win32 error 0n2
+Loading Kernel Symbols
+...............................................................
+..................................
+Loading User Symbols
+Loading unloaded module list
+................
+0: kd> .reload /f
+Unable to load image ntoskrnl.exe, Win32 error 0n2
+Loading Kernel Symbols
+.Unable to load image hal.dll, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for hal.dll
+.Unable to load image BOOTVID.dll, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for BOOTVID.dll
+.Unable to load image ACPI.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ACPI.sys
+.Unable to load image WMILIB.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for WMILIB.SYS
+.Unable to load image pci.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for pci.sys
+.Unable to load image isapnp.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for isapnp.sys
+.Unable to load image compbatt.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for compbatt.sys
+.Unable to load image BATTC.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for BATTC.SYS
+.Unable to load image intelide.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for intelide.sys
+.Unable to load image PCIIDEX.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for PCIIDEX.SYS
+.Unable to load image ftdisk.sys, Win32 error 0n2
+.Unable to load image Diskperf.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Diskperf.sys
+.Unable to load image dmload.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for dmload.sys
+.Unable to load image dmio.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for dmio.sys
+.Unable to load image PartMgr.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for PartMgr.sys
+.Unable to load image vmci.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmci.sys
+.Unable to load image MountMgr.sys, Win32 error 0n2
+*** WARNING: symbols timestamp is wrong 0x4301a697 0x41afde6d for MountMgr.sys
+.Unable to load image vsock.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vsock.sys
+.Unable to load image atapi.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for atapi.sys
+.Unable to load image buslogic.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for buslogic.sys
+.Unable to load image SCSIPORT.SYS, Win32 error 0n2
+*** WARNING: symbols timestamp is wrong 0x42d65966 0x41d397e0 for SCSIPORT.SYS
+.Unable to load image vmscsi.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmscsi.sys
+.Unable to load image disk.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for disk.sys
+.Unable to load image CLASSPNP.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for CLASSPNP.SYS
+.Unable to load image fltmgr.sys, Win32 error 0n2
+.Unable to load image KSecDD.sys, Win32 error 0n2
+.Unable to load image Ntfs.sys, Win32 error 0n2
+.Unable to load image NDIS.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for NDIS.sys
+.Unable to load image Mup.sys, Win32 error 0n2
+.Unable to load image agp440.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for agp440.sys
+.Unable to load image i8042prt.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for i8042prt.sys
+.Unable to load image kbdclass.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for kbdclass.sys
+.Unable to load image vmmouse.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmmouse.sys
+.Unable to load image mouclass.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for mouclass.sys
+.Unable to load image cdrom.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for cdrom.sys
+.Unable to load image VIDEOPRT.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for VIDEOPRT.SYS
+.Unable to load image vmx_svga.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmx_svga.sys
+.Unable to load image USBD.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for USBD.SYS
+.Unable to load image uhcd.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for uhcd.sys
+.Unable to load image vmxnet.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmxnet.sys
+.Unable to load image KS.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for KS.SYS
+.Unable to load image portcls.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for portcls.sys
+.Unable to load image es1371mp.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for es1371mp.sys
+.Unable to load image USBPORT.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for USBPORT.SYS
+.Unable to load image usbehci.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for usbehci.sys
+.Unable to load image CmBatt.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for CmBatt.sys
+.Unable to load image audstub.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for audstub.sys
+.Unable to load image rasl2tp.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for rasl2tp.sys
+.Unable to load image ndistapi.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ndistapi.sys
+.Unable to load image ndiswan.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ndiswan.sys
+.Unable to load image TDI.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for TDI.SYS
+.Unable to load image raspptp.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for raspptp.sys
+.Unable to load image ptilink.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ptilink.sys
+.Unable to load image raspti.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for raspti.sys
+.Unable to load image swenum.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for swenum.sys
+.Unable to load image update.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for update.sys
+.Unable to load image usbhub.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for usbhub.sys
+.Unable to load image gameenum.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for gameenum.sys
+.Unable to load image usbhub20.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for usbhub20.sys
+.Unable to load image NDProxy.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for NDProxy.SYS
+.Unable to load image EFS.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for EFS.SYS
+.Unable to load image HIDPARSE.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for HIDPARSE.SYS
+.
+Unable to load image HIDCLASS.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for HIDCLASS.SYS
+.Unable to load image hidusb.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for hidusb.sys
+.Unable to load image mouhid.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for mouhid.sys
+.Unable to load image vmusbmouse.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmusbmouse.sys
+.Unable to load image Fs_Rec.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Fs_Rec.SYS
+.Unable to load image Null.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Null.SYS
+.Unable to load image Beep.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Beep.SYS
+.Unable to load image vga.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vga.sys
+.Unable to load image mnmdd.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for mnmdd.SYS
+.Unable to load image Msfs.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Msfs.SYS
+.Unable to load image Npfs.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Npfs.SYS
+.Unable to load image rasacd.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for rasacd.sys
+.Unable to load image tcpip.sys, Win32 error 0n2
+.Unable to load image msgpc.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for msgpc.sys
+.Unable to load image wanarp.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for wanarp.sys
+.Unable to load image netbt.sys, Win32 error 0n2
+.Unable to load image netbios.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for netbios.sys
+.Unable to load image vmhgfs.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmhgfs.sys
+.Unable to load image rdbss.sys, Win32 error 0n2
+.Unable to load image mrxsmb.sys, Win32 error 0n2
+.Unable to load image dump_scsiport.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for dump_scsiport.sys
+.Unable to load image dump_vmscsi.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for dump_vmscsi.sys
+.Unable to load image win32k.sys, Win32 error 0n2
+.Unable to load image vmx_fb.dll, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmx_fb.dll
+.Unable to load image ws2ifsl.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ws2ifsl.sys
+.Unable to load image afd.sys, Win32 error 0n2
+.Unable to load image vmmemctl.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for vmmemctl.sys
+.Unable to load image Fips.SYS, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for Fips.SYS
+.Unable to load image srv.sys, Win32 error 0n2
+.Unable to load image Cdfs.SYS, Win32 error 0n2
+.Unable to load image wdmaud.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for wdmaud.sys
+.Unable to load image sysaudio.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for sysaudio.sys
+.Unable to load image ipsec.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for ipsec.sys
+.Unable to load image kmixer.sys, Win32 error 0n2
+*** WARNING: Unable to verify timestamp for kmixer.sys
+.
+Loading User Symbols
+Loading unloaded module list
+................
+
+************* Symbol Loading Error Summary **************
+Module name            Error
+hal                    The system cannot find the file specified
+WMILIB                 The system cannot find the file specified
+pci                    The system cannot find the file specified
+isapnp                 The system cannot find the file specified
+compbatt               The system cannot find the file specified
+BATTC                  The system cannot find the file specified
+intelide               The system cannot find the file specified
+PCIIDEX                The system cannot find the file specified
+Diskperf               The system cannot find the file specified
+dmload                 The system cannot find the file specified
+dmio                   The system cannot find the file specified
+PartMgr                The system cannot find the file specified
+vmci                   The system cannot find the file specified
+vsock                  The system cannot find the file specified
+atapi                  The system cannot find the file specified
+buslogic               The system cannot find the file specified
+vmscsi                 The system cannot find the file specified
+disk                   The system cannot find the file specified
+CLASSPNP               The system cannot find the file specified
+NDIS                   The system cannot find the file specified
+agp440                 The system cannot find the file specified
+i8042prt               The system cannot find the file specified
+kbdclass               The system cannot find the file specified
+vmmouse                The system cannot find the file specified
+mouclass               The system cannot find the file specified
+cdrom                  The system cannot find the file specified
+vmx_svga               The system cannot find the file specified
+USBD                   The system cannot find the file specified
+uhcd                   The system cannot find the file specified
+vmxnet                 The system cannot find the file specified
+KS                     The system cannot find the file specified
+portcls                The system cannot find the file specified
+es1371mp               The system cannot find the file specified
+USBPORT                The system cannot find the file specified
+usbehci                The system cannot find the file specified
+CmBatt                 The system cannot find the file specified
+audstub                The system cannot find the file specified
+rasl2tp                The system cannot find the file specified
+ndistapi               The system cannot find the file specified
+ndiswan                The system cannot find the file specified
+TDI                    The system cannot find the file specified
+raspptp                The system cannot find the file specified
+ptilink                The system cannot find the file specified
+raspti                 The system cannot find the file specified
+swenum                 The system cannot find the file specified
+update                 The system cannot find the file specified
+usbhub                 The system cannot find the file specified
+gameenum               The system cannot find the file specified
+usbhub20               The system cannot find the file specified
+NDProxy                The system cannot find the file specified
+EFS                    The system cannot find the file specified
+HIDPARSE               The system cannot find the file specified
+HIDCLASS               The system cannot find the file specified
+hidusb                 The system cannot find the file specified
+mouhid                 The system cannot find the file specified
+vmusbmouse             The system cannot find the file specified
+Fs_Rec                 The system cannot find the file specified
+Null                   The system cannot find the file specified
+Beep                   The system cannot find the file specified
+vga                    The system cannot find the file specified
+mnmdd                  The system cannot find the file specified
+Msfs                   The system cannot find the file specified
+Npfs                   The system cannot find the file specified
+rasacd                 The system cannot find the file specified
+msgpc                  The system cannot find the file specified
+wanarp                 The system cannot find the file specified
+netbios                The system cannot find the file specified
+vmhgfs                 The system cannot find the file specified
+dump_scsiport          The system cannot find the file specified
+dump_vmscsi            The system cannot find the file specified
+vmx_fb                 The system cannot find the file specified
+ws2ifsl                The system cannot find the file specified
+vmmemctl               The system cannot find the file specified
+Fips                   The system cannot find the file specified
+wdmaud                 The system cannot find the file specified
+sysaudio               The system cannot find the file specified
+ipsec                  The system cannot find the file specified
+kmixer                 The system cannot find the file specified
+
+You can troubleshoot most symbol related issues by turning on symbol loading diagnostics (!sym noisy) and repeating the command that caused symbols to be loaded.
+You should also verify that your symbol search path (.sympath) is correct.
+0: kd> !analyze -v
+Unable to load image ntoskrnl.exe, Win32 error 0n2
+Loading Kernel Symbols
+...............................................................
+..................................
+Loading User Symbols
+Loading unloaded module list
+................
+*******************************************************************************
+*                                                                             *
+*                        Bugcheck Analysis                                    *
+*                                                                             *
+*******************************************************************************
+
+KMODE_EXCEPTION_NOT_HANDLED (1e)
+This is a very common BugCheck.  Usually the exception address pinpoints
+the driver/function that caused the problem.  Always note this address
+as well as the link date of the driver/image that contains this address.
+Arguments:
+Arg1: c0000005, The exception code that was not handled
+Arg2: 00000000, The address that the exception occurred at
+Arg3: 00000000, Parameter 0 of the exception
+Arg4: 00000000, Parameter 1 of the exception
+
+Debugging Details:
+------------------
+
+
+KEY_VALUES_STRING: 1
+
+    Key  : Analysis.CPU.mSec
+    Value: 734
+
+    Key  : Analysis.Elapsed.mSec
+    Value: 729
+
+    Key  : Analysis.IO.Other.Mb
+    Value: 9
+
+    Key  : Analysis.IO.Read.Mb
+    Value: 1
+
+    Key  : Analysis.IO.Write.Mb
+    Value: 1
+
+    Key  : Analysis.Init.CPU.mSec
+    Value: 1656
+
+    Key  : Analysis.Init.Elapsed.mSec
+    Value: 560722
+
+    Key  : Analysis.Memory.CommitPeak.Mb
+    Value: 44
+
+    Key  : Analysis.Version.DbgEng
+    Value: 10.0.29507.1001
+
+    Key  : Analysis.Version.Description
+    Value: 10.2511.5.1 amd64fre
+
+    Key  : Analysis.Version.Ext
+    Value: 1.2511.5.1
+
+    Key  : Bugcheck.Code.LegacyAPI
+    Value: 0x1e
+
+    Key  : Bugcheck.Code.TargetModel
+    Value: 0x1e
+
+    Key  : Failure.Bucket
+    Value: 0x1E_nt!RtlDnsHostNameToComputerName
+
+    Key  : Failure.Hash
+    Value: {9d730c3f-f8be-5d53-2595-b40d6076530c}
+
+
+BUGCHECK_CODE:  1e
+
+BUGCHECK_P1: ffffffffc0000005
+
+BUGCHECK_P2: 0
+
+BUGCHECK_P3: 0
+
+BUGCHECK_P4: 0
+
+FILE_IN_CAB:  Mini020426-01.dmp
+
+FAULTING_THREAD:  ffffffff85e7c620
+
+CUSTOMER_CRASH_COUNT:  1
+
+PROCESS_NAME:  System
+
+STACK_TEXT:  
+f204b410 00000000     c0000005 00000000 00000000 nt!RtlDnsHostNameToComputerName+0x3a
+
+
+STACK_COMMAND: .thread /r /p 0xffffffff85e7c620 ; kb
+
+SYMBOL_NAME:  nt!RtlDnsHostNameToComputerName+3a
+
+MODULE_NAME: nt
+
+IMAGE_NAME:  ntoskrnl.exe
+
+BUCKET_ID_FUNC_OFFSET:  3a
+
+FAILURE_BUCKET_ID:  0x1E_nt!RtlDnsHostNameToComputerName
+
+OSPLATFORM_TYPE:  x86
+
+OSNAME:  Windows 2000
+
+FAILURE_ID_HASH:  {9d730c3f-f8be-5d53-2595-b40d6076530c}
+
+Followup:     MachineOwner
+---------
+
+0: kd> .thread /r /p 0xffffffff85e7c620 ; kb
+Implicit thread is now 85e7c620
+Implicit process is now 85e83020
+Loading User Symbols
+  *** Stack trace for last set context - .thread/.cxr resets it
+ # ChildEBP RetAddr      Args to Child              
+00 f204b410 00000000     c0000005 00000000 00000000 nt!RtlDnsHostNameToComputerName+0x3a
