@@ -84,7 +84,7 @@ This project is a **pre-professional** Windows 2000 MTP KMDF 1.9 driver and user
 
 ## User-Mode Application (GUI)
 
-![MTP File Transfer GUI]([user_app/mtp_gui_screenshot.png](https://media.discordapp.net/attachments/1335004090668810310/1470035218571198647/image.png?ex=6989d47c&is=698882fc&hm=25398f84cbe3cc9bc465d292bcad0405fadbb3324652d86a39bf2586115a64cc&=&format=webp&quality=lossless&width=1071&height=770))
+![MTP File Transfer GUI]([https://media.discordapp.net/attachments/1335004090668810310/1470035218571198647/image.png?ex=6989d47c&is=698882fc&hm=25398f84cbe3cc9bc465d292bcad0405fadbb3324652d86a39bf2586115a64cc&=&format=webp&quality=lossless&width=1071&height=770]))
 
 The user-mode application, located in the `user_app/` directory, provides a graphical interface for interacting with the MTP driver. It allows users to:
 
