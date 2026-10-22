@@ -10,7 +10,6 @@ Class=USB
 ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
 Provider=%ProviderName%
 DriverVer=02/01/2026,2.0.0.1
-CatalogFile=mtp.cat
 
 ; ==================== Manufacturer Section ====================
 ; Windows 2000 requires an UNDECORATED Models section!
@@ -21,6 +20,9 @@ CatalogFile=mtp.cat
 ; Undecorated Models section - REQUIRED for Windows 2000
 ; Windows 2000 ignores all decorated sections like .NT, .NTx86, etc.
 [MfgSection]
+; ---- QEMU USB MTP Device (Emulated Android / Phone) ----
+%DeviceDesc%=MtpInstall, USB\VID_46F4&PID_0004
+
 ; ---- PTP/MTP Class devices (Still Image Class 0x06) ----
 ; This matches cameras, phones in PTP/MTP mode
 %DeviceDesc%=MtpInstall, USB\CLASS_06&SUBCLASS_01&PROT_01
@@ -52,13 +54,42 @@ CatalogFile=mtp.cat
 ; Apple (PTP mode for photos)
 %DeviceDesc%=MtpInstall, USB\VID_05AC&PID_12A8
 
-; ---- Digital Cameras (PTP) ----
-; Canon cameras
+; ---- Digital Cameras (PTP / MTP) ----
+; Universal PTP Still Image Class (matches all PTP digital cameras)
+%DeviceDesc%=MtpInstall, USB\CLASS_06&SUBCLASS_01&PROT_01
+%DeviceDesc%=MtpInstall, USB\CLASS_06&SUBCLASS_01
+%DeviceDesc%=MtpInstall, USB\CLASS_06
+
+; Canon Digital Cameras (EOS, PowerShot, IXUS)
 %DeviceDesc%=MtpInstall, USB\VID_04A9&PID_3218
-; Nikon cameras
+%DeviceDesc%=MtpInstall, USB\VID_04A9&PID_319A
+%DeviceDesc%=MtpInstall, USB\VID_04A9&PID_3110
+%DeviceDesc%=MtpInstall, USB\VID_04A9&PID_3277
+
+; Nikon Digital Cameras (Coolpix, D-Series DSLR, Z-Series)
 %DeviceDesc%=MtpInstall, USB\VID_04B0&PID_0428
-; Sony cameras
+%DeviceDesc%=MtpInstall, USB\VID_04B0&PID_0427
+%DeviceDesc%=MtpInstall, USB\VID_04B0&PID_0421
+%DeviceDesc%=MtpInstall, USB\VID_04B0&PID_0128
+
+; Sony Digital Cameras (Alpha, Cyber-shot, Handycam)
 %DeviceDesc%=MtpInstall, USB\VID_054C&PID_004E
+%DeviceDesc%=MtpInstall, USB\VID_054C&PID_0010
+%DeviceDesc%=MtpInstall, USB\VID_054C&PID_02E6
+
+; Fujifilm Digital Cameras (FinePix, X-Series)
+%DeviceDesc%=MtpInstall, USB\VID_04CB&PID_0100
+%DeviceDesc%=MtpInstall, USB\VID_04CB&PID_0160
+
+; Panasonic Lumix Cameras
+%DeviceDesc%=MtpInstall, USB\VID_04DA&PID_2372
+%DeviceDesc%=MtpInstall, USB\VID_04DA&PID_0500
+
+; Olympus Digital Cameras
+%DeviceDesc%=MtpInstall, USB\VID_07B4&PID_0109
+
+; GoPro Action Cameras (MTP mode)
+%DeviceDesc%=MtpInstall, USB\VID_2672&PID_000D
 
 ; ==================== Destination Directories ====================
 [DestinationDirs]
@@ -77,6 +108,23 @@ WdfCoInstaller01009.dll=1,,
 ; ==================== Installation Section ====================
 ; UNDECORATED section required for Windows 2000!
 ; Win2000 SetupAPI ignores .NT, .NTx86, .NT.5.1 sections completely
+[DefaultInstall]
+CopyFiles = MtpCopyFiles, CoInstallers_CopyFiles
+AddReg = MtpAddReg
+
+[DefaultInstall.Services]
+AddService = Mtp, 0x00000002, Mtp_Service_Inst, Mtp_EventLog_Inst
+
+[DefaultInstall.HW]
+AddReg = MtpHwAddReg
+
+[DefaultInstall.CoInstallers]
+AddReg = CoInstallers_AddReg
+CopyFiles = CoInstallers_CopyFiles
+
+[DefaultInstall.Wdf]
+KmdfService = Mtp, Mtp_wdfsect
+
 [MtpInstall]
 CopyFiles = MtpCopyFiles
 AddReg = MtpAddReg

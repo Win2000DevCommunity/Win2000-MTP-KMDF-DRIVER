@@ -17,10 +17,18 @@
  * IOCTL Definitions (must match driver's Mtp.h)
  * ============================================================================ */
 
+#ifndef FILE_DEVICE_UNKNOWN
 #define FILE_DEVICE_UNKNOWN 0x00000022
+#endif
+#ifndef METHOD_BUFFERED
 #define METHOD_BUFFERED 0
+#endif
+#ifndef FILE_READ_DATA
 #define FILE_READ_DATA 0x0001
+#endif
+#ifndef FILE_WRITE_DATA
 #define FILE_WRITE_DATA 0x0002
+#endif
 
 #ifndef CTL_CODE
 #define CTL_CODE(DeviceType, Function, Method, Access) \
@@ -34,6 +42,7 @@
 #define IOCTL_MTP_SESSION_OPEN       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_READ_DATA)
 #define IOCTL_MTP_SESSION_CLOSE      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_READ_DATA)
 #define IOCTL_MTP_OPERATION          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED, FILE_READ_DATA)
+#define IOCTL_MTP_GET_TRANSFER_SPEED CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_READ_DATA)
 
 /* Default device symbolic link name */
 #define DEVICE_NAME "\\\\.\\MtpDevice"
@@ -53,6 +62,10 @@
 #define MTP_OP_SEND_OBJECT_INFO      0x100C
 #define MTP_OP_SEND_OBJECT           0x100D
 #define MTP_OP_GET_PARTIAL_OBJECT    0x101B
+#define MTP_OP_GET_OBJECT_PROPS_SUPP 0x9801
+#define MTP_OP_GET_OBJECT_PROP_DESC  0x9802
+#define MTP_OP_GET_OBJECT_PROP_VALUE 0x9803
+#define MTP_OP_SET_OBJECT_PROP_VALUE 0x9804
 
 /* MTP Response Codes */
 #define MTP_RESP_OK                  0x2001
@@ -101,13 +114,22 @@
  * Structures
  * ============================================================================ */
 
-/* Request structure for GetObjectPart IOCTL */
+/* Request structure for GetObjectPart IOCTL (64-bit offsets, matches driver) */
 #pragma pack(push, 1)
 typedef struct _MTP_GET_PART_REQ {
     DWORD Id;
-    DWORD Offset;
+    DWORD OffsetLow;
+    DWORD OffsetHigh;
     DWORD Length;
 } MTP_GET_PART_REQ, *PMTP_GET_PART_REQ;
+
+/* Dynamic USB transfer speed info (matches driver) */
+typedef struct _MTP_SPEED_INFO {
+    DWORD ControllerType;    /* 1=UHCI/OHCI (USB 1.1), 2=EHCI (USB 2.0), 3=xHCI (USB 3.x/4) */
+    DWORD MaxPacketSize;     /* 64, 512, or 1024 */
+    DWORD OptimalChunkSize;  /* 16384 (16KB), 65536 (64KB), or 262144 (256KB) */
+    CHAR  Description[64];
+} MTP_SPEED_INFO, *PMTP_SPEED_INFO;
 #pragma pack(pop)
 
 /* Object info structure (simplified) */
@@ -151,6 +173,20 @@ void PrintHexDump(const BYTE *buffer, DWORD size, DWORD maxBytes)
     }
     if (limit % 16 != 0) printf("\n");
     if (size > maxBytes) printf("... (%lu more bytes)\n", size - maxBytes);
+}
+
+/* Format 64-bit file size */
+void FormatFileSize64(ULONGLONG bytes, char *buf, size_t bufSize)
+{
+    if (bytes < 1024ULL) {
+        _snprintf(buf, bufSize, "%u B", (DWORD)bytes);
+    } else if (bytes < 1048576ULL) {
+        _snprintf(buf, bufSize, "%.2f KB", (double)bytes / 1024.0);
+    } else if (bytes < 1073741824ULL) {
+        _snprintf(buf, bufSize, "%.2f MB", (double)bytes / 1048576.0);
+    } else {
+        _snprintf(buf, bufSize, "%.2f GB", (double)bytes / 1073741824.0);
+    }
 }
 
 /* Read MTP string from buffer (returns pointer past string, NULL on error) */
@@ -371,10 +407,6 @@ BOOL MtpGetDeviceInfo(void)
     DWORD vendorExtId;
     WORD vendorExtVersion;
     WCHAR vendorExtDesc[256];
-    WCHAR manufacturer[256];
-    WCHAR model[256];
-    WCHAR deviceVersion[256];
-    WCHAR serialNumber[256];
     
     printf("\n--- Device Information ---\n");
     
@@ -552,9 +584,27 @@ BOOL MtpGetObjectInfo(DWORD objectHandle)
         ReadMtpString(p, (DWORD)(buffer + bytesReceived - p), filename, 256);
     }
     
-    wprintf(L"  Object 0x%08lX: %s [%hs] Size: %lu bytes, Parent: 0x%08lX\n",
-           objectHandle, filename, GetFormatName(objectFormat), 
-           compressedSize, parentObject);
+    /* 64-bit file size support */
+    {
+        ULONGLONG trueSize = (ULONGLONG)compressedSize;
+        char sizeStr[32];
+        if (compressedSize == 0xFFFFFFFF && objectFormat != MTP_FORMAT_ASSOCIATION) {
+            BYTE propBuf[16];
+            DWORD propBytes = 0;
+            DWORD propParams[2];
+            propParams[0] = objectHandle;
+            propParams[1] = 0xDC04; /* ObjectSize property (64-bit) */
+            if (MtpSendOperation(MTP_OP_GET_OBJECT_PROP_VALUE, propParams, 2, NULL, 0, propBuf, sizeof(propBuf), &propBytes) && propBytes >= 8) {
+                DWORD low = *((DWORD*)(propBuf + 0));
+                DWORD high = *((DWORD*)(propBuf + 4));
+                trueSize = ((ULONGLONG)high << 32) | (ULONGLONG)low;
+            }
+        }
+        FormatFileSize64(trueSize, sizeStr, sizeof(sizeStr));
+        wprintf(L"  Object 0x%08lX: %s [%hs] Size: %hs (%I64u bytes), Parent: 0x%08lX\n",
+               objectHandle, filename, GetFormatName(objectFormat), 
+               sizeStr, trueSize, parentObject);
+    }
     
     return TRUE;
 }
@@ -583,33 +633,62 @@ BOOL MtpListObjects(DWORD storageId)
 /* Download a file from device */
 BOOL MtpDownloadFile(DWORD objectHandle, const char *localPath)
 {
-    FILE *fp;
-    BYTE buffer[32768];  /* 32KB chunks */
+    HANDLE hFile;
+    BYTE *buffer;
+    DWORD chunkSize = 65536;
     MTP_GET_PART_REQ req;
     DWORD bytesReturned;
-    DWORD totalBytes;
+    DWORD bytesWritten;
+    ULONGLONG totalBytes = 0;
     BOOL result;
+    DWORD startTick, lastTick, curTick;
+    MTP_SPEED_INFO speedInfo;
+    DWORD speedRet = 0;
+    char sizeStr[32];
     
     printf("\n--- Downloading Object 0x%08lX ---\n", objectHandle);
     printf("Saving to: %s\n", localPath);
     
-    fp = fopen(localPath, "wb");
-    if (!fp) {
-        printf("ERROR: Cannot create file '%s'\n", localPath);
+    /* Query optimal speed/chunk size from driver */
+    if (DeviceIoControl(g_hDevice, IOCTL_MTP_GET_TRANSFER_SPEED, NULL, 0,
+                        &speedInfo, sizeof(speedInfo), &speedRet, NULL) && speedRet >= sizeof(DWORD)*3) {
+        if (speedInfo.OptimalChunkSize >= 16384 && speedInfo.OptimalChunkSize <= 262144) {
+            chunkSize = speedInfo.OptimalChunkSize;
+        }
+        printf("USB Controller: %s (Optimal Chunk: %lu KB)\n", 
+               (speedInfo.ControllerType == 1) ? "USB 1.1 Full-Speed (UHCI/OHCI)" :
+               (speedInfo.ControllerType == 2) ? "USB 2.0 High-Speed (EHCI)" :
+               (speedInfo.ControllerType == 3) ? "USB 3.x/4 SuperSpeed (xHCI)" : "Standard MTP",
+               chunkSize / 1024);
+    }
+    
+    buffer = (BYTE*)malloc(chunkSize);
+    if (!buffer) {
+        printf("ERROR: Memory allocation failed for chunk buffer (%lu bytes)\n", chunkSize);
         return FALSE;
     }
     
-    totalBytes = 0;
+    hFile = CreateFileA(localPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        printf("ERROR: Cannot create file '%s' (Error %lu)\n", localPath, GetLastError());
+        free(buffer);
+        return FALSE;
+    }
+    
+    startTick = GetTickCount();
+    lastTick = startTick;
+    
     req.Id = objectHandle;
-    req.Offset = 0;
-    req.Length = sizeof(buffer);
+    req.OffsetLow = 0;
+    req.OffsetHigh = 0;
+    req.Length = chunkSize;
     
     while (1) {
         result = DeviceIoControl(
             g_hDevice,
             IOCTL_MTP_GET_OBJECT_PART,
             &req, sizeof(req),
-            buffer, sizeof(buffer),
+            buffer, chunkSize,
             &bytesReturned,
             NULL
         );
@@ -617,102 +696,176 @@ BOOL MtpDownloadFile(DWORD objectHandle, const char *localPath)
         if (!result) {
             DWORD err = GetLastError();
             if (err == ERROR_HANDLE_EOF || bytesReturned == 0) {
-                break;  /* End of file */
+                break;
             }
-            printf("ERROR: Failed to read object. Error: %lu\n", err);
-            fclose(fp);
+            printf("\nERROR: Failed to read object part at offset %lu. Error: %lu\n", req.OffsetLow, err);
+            CloseHandle(hFile);
+            free(buffer);
             return FALSE;
         }
         
         if (bytesReturned == 0) break;
         
-        fwrite(buffer, 1, bytesReturned, fp);
+        if (!WriteFile(hFile, buffer, bytesReturned, &bytesWritten, NULL) || bytesWritten != bytesReturned) {
+            printf("\nERROR: Failed to write to disk. Error: %lu\n", GetLastError());
+            CloseHandle(hFile);
+            free(buffer);
+            return FALSE;
+        }
+        
         totalBytes += bytesReturned;
-        req.Offset += bytesReturned;
         
-        /* Progress indicator */
-        printf("\rDownloaded: %lu bytes...", totalBytes);
-        fflush(stdout);
+        /* 64-bit offset calculation */
+        {
+            ULONGLONG nextOff = ((ULONGLONG)req.OffsetHigh << 32) | (ULONGLONG)req.OffsetLow;
+            nextOff += bytesReturned;
+            req.OffsetLow = (DWORD)(nextOff & 0xFFFFFFFF);
+            req.OffsetHigh = (DWORD)(nextOff >> 32);
+        }
         
-        if (bytesReturned < sizeof(buffer)) break;  /* Last chunk */
+        curTick = GetTickCount();
+        if (curTick - lastTick >= 200 || bytesReturned < chunkSize) {
+            DWORD elapsedMs = curTick - startTick;
+            double speedMB = 0.0;
+            if (elapsedMs > 0) {
+                speedMB = ((double)totalBytes / 1048576.0) / ((double)elapsedMs / 1000.0);
+            }
+            FormatFileSize64(totalBytes, sizeStr, sizeof(sizeStr));
+            printf("\rDownloaded: %s [%.2f MB/s]...", sizeStr, speedMB);
+            fflush(stdout);
+            lastTick = curTick;
+        }
+        
+        if (bytesReturned < chunkSize) break;
     }
     
-    fclose(fp);
-    printf("\nDownload complete. Total: %lu bytes\n", totalBytes);
+    CloseHandle(hFile);
+    free(buffer);
+    
+    FormatFileSize64(totalBytes, sizeStr, sizeof(sizeStr));
+    {
+        DWORD totalMs = GetTickCount() - startTick;
+        double avgSpeed = 0.0;
+        if (totalMs > 0) {
+            avgSpeed = ((double)totalBytes / 1048576.0) / ((double)totalMs / 1000.0);
+        }
+        printf("\nDownload complete: %s in %.1f sec (Avg: %.2f MB/s)\n", sizeStr, (double)totalMs / 1000.0, avgSpeed);
+    }
     return TRUE;
 }
 
 /* Upload a file to device */
 BOOL MtpUploadFile(const char *localPath, DWORD parentHandle)
 {
-    FILE *fp;
+    HANDLE hFile;
     BYTE *buffer;
+    DWORD chunkSize = 65536;
+    DWORD headerSize = 8; /* [DWORD id][DWORD offset] */
     DWORD bufferSize;
     DWORD bytesRead;
-    DWORD totalBytes;
-    DWORD offset;
-    DWORD objectId;
+    ULONGLONG totalBytes = 0;
+    ULONGLONG fileSize = 0;
+    DWORD fileSizeLow, fileSizeHigh = 0;
+    DWORD objectId = 0;
     DWORD bytesReturned;
     BOOL result;
+    DWORD startTick, lastTick, curTick;
+    MTP_SPEED_INFO speedInfo;
+    DWORD speedRet = 0;
+    char sizeStr[32];
     
     printf("\n--- Uploading File ---\n");
     printf("Source: %s\n", localPath);
     printf("Parent Object: 0x%08lX\n", parentHandle);
     
-    fp = fopen(localPath, "rb");
-    if (!fp) {
-        printf("ERROR: Cannot open file '%s'\n", localPath);
+    if (DeviceIoControl(g_hDevice, IOCTL_MTP_GET_TRANSFER_SPEED, NULL, 0,
+                        &speedInfo, sizeof(speedInfo), &speedRet, NULL) && speedRet >= sizeof(DWORD)*3) {
+        if (speedInfo.OptimalChunkSize >= 16384 && speedInfo.OptimalChunkSize <= 262144) {
+            chunkSize = speedInfo.OptimalChunkSize;
+        }
+        printf("USB Controller: %s (Optimal Chunk: %lu KB)\n", 
+               (speedInfo.ControllerType == 1) ? "USB 1.1 Full-Speed (UHCI/OHCI)" :
+               (speedInfo.ControllerType == 2) ? "USB 2.0 High-Speed (EHCI)" :
+               (speedInfo.ControllerType == 3) ? "USB 3.x/4 SuperSpeed (xHCI)" : "Standard MTP",
+               chunkSize / 1024);
+    }
+    
+    hFile = CreateFileA(localPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        printf("ERROR: Cannot open file '%s' (Error %lu)\n", localPath, GetLastError());
         return FALSE;
     }
     
+    fileSizeLow = GetFileSize(hFile, &fileSizeHigh);
+    fileSize = ((ULONGLONG)fileSizeHigh << 32) | (ULONGLONG)fileSizeLow;
+    FormatFileSize64(fileSize, sizeStr, sizeof(sizeStr));
+    printf("File size: %s (%I64u bytes)\n", sizeStr, fileSize);
+    
     /* Buffer format: [DWORD id][DWORD offset][data...] */
-    bufferSize = 8 + 32768;  /* Header + 32KB data */
+    bufferSize = headerSize + chunkSize;
     buffer = (BYTE*)malloc(bufferSize);
     if (!buffer) {
         printf("ERROR: Memory allocation failed\n");
-        fclose(fp);
+        CloseHandle(hFile);
         return FALSE;
     }
     
-    totalBytes = 0;
-    offset = 0;
-    objectId = 0;  /* 0 = create new object */
+    startTick = GetTickCount();
+    lastTick = startTick;
     
-    while ((bytesRead = (DWORD)fread(buffer + 8, 1, 32768, fp)) > 0) {
+    while (ReadFile(hFile, buffer + headerSize, chunkSize, &bytesRead, NULL) && bytesRead > 0) {
         *((DWORD*)(buffer + 0)) = objectId;
-        *((DWORD*)(buffer + 4)) = offset;
+        *((DWORD*)(buffer + 4)) = (DWORD)(totalBytes & 0xFFFFFFFF);
         
         result = DeviceIoControl(
             g_hDevice,
             IOCTL_MTP_SEND_OBJECT_PART,
-            buffer, 8 + bytesRead,
+            buffer, headerSize + bytesRead,
             &objectId, sizeof(objectId),
             &bytesReturned,
             NULL
         );
         
         if (!result) {
-            printf("ERROR: Failed to send object part. Error: %lu\n", GetLastError());
+            printf("\nERROR: Failed to send object part. Error: %lu\n", GetLastError());
             free(buffer);
-            fclose(fp);
+            CloseHandle(hFile);
             return FALSE;
         }
         
-        /* On first chunk, driver returns new object ID */
-        if (offset == 0 && bytesReturned >= sizeof(DWORD)) {
+        if (totalBytes == 0 && bytesReturned >= sizeof(DWORD)) {
             printf("Created object ID: 0x%08lX\n", objectId);
         }
         
         totalBytes += bytesRead;
-        offset += bytesRead;
         
-        printf("\rUploaded: %lu bytes...", totalBytes);
-        fflush(stdout);
+        curTick = GetTickCount();
+        if (curTick - lastTick >= 200 || totalBytes >= fileSize) {
+            DWORD elapsedMs = curTick - startTick;
+            double speedMB = 0.0;
+            double pct = (fileSize > 0) ? ((double)totalBytes * 100.0 / (double)fileSize) : 0.0;
+            if (elapsedMs > 0) {
+                speedMB = ((double)totalBytes / 1048576.0) / ((double)elapsedMs / 1000.0);
+            }
+            FormatFileSize64(totalBytes, sizeStr, sizeof(sizeStr));
+            printf("\rUploaded: %s (%.1f%%) [%.2f MB/s]...", sizeStr, pct, speedMB);
+            fflush(stdout);
+            lastTick = curTick;
+        }
     }
     
     free(buffer);
-    fclose(fp);
-    printf("\nUpload complete. Total: %lu bytes\n", totalBytes);
+    CloseHandle(hFile);
+    
+    FormatFileSize64(totalBytes, sizeStr, sizeof(sizeStr));
+    {
+        DWORD totalMs = GetTickCount() - startTick;
+        double avgSpeed = 0.0;
+        if (totalMs > 0) {
+            avgSpeed = ((double)totalBytes / 1048576.0) / ((double)totalMs / 1000.0);
+        }
+        printf("\nUpload complete: %s in %.1f sec (Avg: %.2f MB/s)\n", sizeStr, (double)totalMs / 1000.0, avgSpeed);
+    }
     return TRUE;
 }
 

@@ -1,0 +1,33 @@
+Windows Registry Editor Version 5.00
+
+; ==============================================================================
+; Register "Portable Device" inside the Windows 2000 "My Computer" folder
+; ==============================================================================
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{E0C30E66-2679-4594-817D-38F75FEF30A1}]
+@="Portable Device (Android Smartphone)"
+
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}]
+@="Portable Device (Android Smartphone)"
+"InfoTip"="Device: Portable Android Device\nStorage: Dynamically detected from connected phone\nFile System: MTP (Media Transfer Protocol)\nStatus: Ready for connection"
+"IntroText"="Portable Mobile Device Storage"
+"Comments"="Storage: Dynamic (Auto-detected per device)"
+"LocalizedString"="Portable Device (Android Smartphone)"
+
+; Use Windows 2000 digital media / camera / portable device shell icon (shell32.dll index 17)
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\DefaultIcon]
+@="%SystemRoot%\\System32\\shell32.dll,17"
+
+; Shell Folder Attributes
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\ShellFolder]
+"Attributes"=hex:00,00,00,00
+
+; Launch mtp_gui.exe when opened from My Computer
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\Shell]
+@="Open"
+
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\Shell\Open]
+@="&Open"
+
+[HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\Shell\Open\Command]
+@="\"C:\\WINNT\\System32\\mtp_gui.exe\""

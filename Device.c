@@ -43,12 +43,6 @@ MtpEvtDeviceAdd(
         return status;
     }
 
-    status = MtpUsb_Create(device, NULL);
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("MTP: MtpUsb_Create failed 0x%08x\n", status));
-        return status;
-    }
-
     // Create I/O queue for device IOCTLs (user-mode test app will use these IOCTLs to exercise MTP)
     {
         WDF_IO_QUEUE_CONFIG ioConfig;
@@ -70,14 +64,19 @@ MtpEvtDeviceAdd(
         return status;
     }
 
-    // Create a symbolic link so a user-mode test app can open \\.\MtpSample
+    // Create symbolic links so user-mode apps can open \\.\MtpDevice or \\.\MtpSample
     {
         UNICODE_STRING symLink;
+        RtlInitUnicodeString(&symLink, L"\\DosDevices\\MtpDevice");
+        status = WdfDeviceCreateSymbolicLink(device, &symLink);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("MTP: WdfDeviceCreateSymbolicLink (MtpDevice) failed 0x%08x\n", status));
+        }
+
         RtlInitUnicodeString(&symLink, L"\\DosDevices\\MtpSample");
         status = WdfDeviceCreateSymbolicLink(device, &symLink);
         if (!NT_SUCCESS(status)) {
-            KdPrint(("MTP: WdfDeviceCreateSymbolicLink failed 0x%08x\n", status));
-            // not fatal - continue
+            KdPrint(("MTP: WdfDeviceCreateSymbolicLink (MtpSample) failed 0x%08x\n", status));
         }
     }
 
@@ -104,41 +103,86 @@ MtpEvtIoDeviceControl(
 
     switch (IoControlCode) {
     case IOCTL_MTP_GET_DEVICE_INFO:
-        status = MtpGetDeviceInfo(Request);
+        MtpGetDeviceInfo(Request);
         break;
 
     case IOCTL_MTP_LIST_OBJECTS:
-        status = MtpListObjects(Request);
+        MtpListObjects(Request);
         break;
 
     case IOCTL_MTP_GET_OBJECT_PART:
-        status = MtpGetObjectPart(Request);
+        MtpGetObjectPart(Request);
         break;
 
     case IOCTL_MTP_SEND_OBJECT_PART:
-        status = MtpSendObjectPart(Request);
+        MtpSendObjectPart(Request);
         break;
 
     case IOCTL_MTP_SESSION_OPEN:
-        status = MtpSessionOpen(Request);
+        MtpSessionOpen(Request);
         break;
 
     case IOCTL_MTP_SESSION_CLOSE:
-        status = MtpSessionClose(Request);
+        MtpSessionClose(Request);
         break;
 
     case IOCTL_MTP_OPERATION:
-        status = MtpOperation(Request);
+        MtpOperation(Request);
+        break;
+
+    case IOCTL_MTP_GET_TRANSFER_SPEED:
+        MtpGetTransferSpeed(Request);
         break;
 
     default:
-        status = STATUS_NOT_SUPPORTED;
+        WdfRequestComplete(Request, STATUS_NOT_SUPPORTED);
         break;
     }
+}
 
+NTSTATUS
+MtpGetTransferSpeed(WDFREQUEST Request)
+{
+    WDFDEVICE device;
+    PDEVICE_CONTEXT ctx;
+    MTP_SPEED_INFO speed;
+    PVOID outBuf;
+    size_t outCap;
+    NTSTATUS status;
+
+    device = WdfRequestGetDevice(Request);
+    ctx = DeviceGetContext(device);
+    if (!ctx) {
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE);
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    RtlZeroMemory(&speed, sizeof(speed));
+    speed.MaxPacketSize = ctx->MaxPacketSize ? ctx->MaxPacketSize : 64;
+
+    if (speed.MaxPacketSize <= 64) {
+        /* USB 1.1 Full Speed (UHCI/OHCI) */
+        speed.ControllerType = 1;
+        speed.OptimalChunkSize = 16384;   /* 16 KB: safe for UHCI frame schedules */
+    } else if (speed.MaxPacketSize <= 512) {
+        /* USB 2.0 High Speed (EHCI) */
+        speed.ControllerType = 2;
+        speed.OptimalChunkSize = 65536;   /* 64 KB: optimal for EHCI qTD queues */
+    } else {
+        /* USB 3.0 / USB 4 SuperSpeed (xHCI) */
+        speed.ControllerType = 3;
+        speed.OptimalChunkSize = 262144;  /* 256 KB: high throughput burst TRBs */
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(speed), &outBuf, &outCap);
     if (!NT_SUCCESS(status)) {
         WdfRequestComplete(Request, status);
+        return status;
     }
+
+    RtlCopyMemory(outBuf, &speed, sizeof(speed));
+    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(speed));
+    return STATUS_SUCCESS;
 }
 
 
@@ -149,12 +193,19 @@ MtpEvtDevicePrepareHardware(
     IN WDFCMRESLIST ResourcesTranslated
     )
 {
+    NTSTATUS status;
+
     UNREFERENCED_PARAMETER(ResourcesRaw);
     UNREFERENCED_PARAMETER(ResourcesTranslated);
 
-    // Device-level hardware initialization. For USB we select config in MtpUsb_Create.
-    UNREFERENCED_PARAMETER(Device);
     KdPrint(("MTP: PrepareHardware called\n"));
+
+    status = MtpUsb_PrepareHardware(Device);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: MtpUsb_PrepareHardware failed 0x%08x\n", status));
+        return status;
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -164,23 +215,20 @@ MtpEvtDeviceReleaseHardware(
     IN WDFCMRESLIST ResourcesTranslated
     )
 {
-    PDEVICE_CONTEXT ctx;
     NTSTATUS status;
     
     UNREFERENCED_PARAMETER(ResourcesTranslated);
-
-    ctx = DeviceGetContext(Device);
-    
-    // Mark USB as absent first to fail any pending operations
-    if (ctx) {
-        ctx->UsbPresent = FALSE;
-        KdPrint(("MTP: Marked USB device as absent\n"));
-    }
 
     // Stop USB readers
     status = MtpUsb_StopReaders(Device);
     if (!NT_SUCCESS(status)) {
         KdPrint(("MTP: MtpUsb_StopReaders returned 0x%08x\n", status));
+    }
+
+    // Release USB hardware resources
+    status = MtpUsb_ReleaseHardware(Device);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: MtpUsb_ReleaseHardware returned 0x%08x\n", status));
     }
 
     // Cleanup MTP in-memory objects and responses

@@ -35,10 +35,13 @@ typedef struct _DEVICE_CONTEXT {
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext)
 
 // USB helpers
+NTSTATUS MtpUsb_PrepareHardware(IN WDFDEVICE Device);
+NTSTATUS MtpUsb_ReleaseHardware(IN WDFDEVICE Device);
 NTSTATUS MtpUsb_Create(IN WDFDEVICE Device, IN OPTIONAL PMTP_USB_CONFIG Config);
 NTSTATUS MtpUsb_StartReaders(IN WDFDEVICE Device);
 NTSTATUS MtpUsb_StopReaders(IN WDFDEVICE Device);
 NTSTATUS MtpUsb_WriteBulk(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe, IN PVOID Buffer, IN size_t Length);
+NTSTATUS MtpUsb_ReadBulk(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe, IN PVOID Buffer, IN size_t BufferLength, OUT PULONG BytesRead);
 
 // Continuouse reader callback
 VOID MtpEvtUsbReadComplete(IN WDFUSBPIPE Pipe, IN WDFMEMORY Buffer, IN size_t NumBytesTransferred, IN WDFCONTEXT Context);

@@ -20,3 +20,18 @@ __security_init_cookie(VOID)
     // Real implementation would use random number generation
     __security_cookie = 0xBB40E64E;
 }
+
+VOID
+__cdecl
+__report_rangecheckfailure(VOID)
+{
+    // Stub for buffer overrun reporting
+}
+
+VOID
+__fastcall
+__security_check_cookie(ULONG_PTR cookie)
+{
+    UNREFERENCED_PARAMETER(cookie);
+}
+

@@ -1,0 +1,108 @@
+# ============================================================================
+# Windows 2000 MTP KMDF Driver - .gitignore
+# ============================================================================
+
+# --- Build Artifacts (Object files, PDB, MAP, Preprocessed) ---
+*.obj
+*.pdb
+*.map
+*.lib
+*.exp
+*.res
+*.bsc
+*.sbr
+*.ilk
+*.ncb
+*.suo
+*.sdf
+*.i
+*.pch
+*.idb
+*.exe
+
+# --- Build output directories ---
+obj/
+objd/
+objchk_*/
+objfre_*/
+Debug/
+x64/
+
+# --- DDK / SDK Toolchains (large, not source code) ---
+2000 sdk/
+3790.1830/
+7600.16385.1/
+
+# --- Release binaries & packages (built, not source) ---
+Release/
+*.zip
+*.iso
+
+# --- QEMU / VM test artifacts ---
+*.img
+*.qcow2
+*.ppm
+*.bmp
+qemu_*.log
+kd_*.txt
+
+# --- Temporary screenshots from automated testing ---
+*.png
+!docs/screenshots/*.png
+
+# --- Test automation scripts (development-only) ---
+boot_to_gui.py
+inspect_logon.py
+install_automation.py
+run_all_operations_test.py
+run_full_gui_transfer_test.py
+run_installer_fixed.py
+run_kmdf_setup.py
+run_search_test_now.py
+run_visual_verification.py
+run_vm_and_test.py
+run_vm_test.py
+test_camera_emulation.py
+test_close_and_run.py
+test_gui_app.py
+test_gui_clean.py
+test_gui_live.py
+test_mtp_full.py
+test_normal_boot.py
+test_search_live.py
+test_suite_live.py
+switch_boot_mode.py
+patch_vm_boot.py
+restore_kernel32.py
+update_cmd.py
+get_keys.py
+comprehensive_c90_fix.py
+fix_c99.py
+
+# --- Miscellaneous temporary / backup files ---
+*.backup
+*.bak
+*.log
+*.wrn
+*.err
+debug.txt
+headers_used.txt
+qemu_help.txt
+
+# --- IDE / Editor ---
+.vscode/
+.vs/
+*.user
+
+# --- Duplicate root files that belong in Release/ ---
+exit_stub.*
+test_preprocess.*
+vc70.pdb
+
+# --- Large/external project directories ---
+RemoteDesk2K/
+temp_driver_push/
+
+# --- Preprocessed source copies (huge, generated) ---
+*_pp.c
+*_pp.i

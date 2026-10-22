@@ -14,90 +14,112 @@
 
 
 NTSTATUS
-MtpUsb_Create(WDFDEVICE Device, PMTP_USB_CONFIG Config)
+MtpUsb_PrepareHardware(WDFDEVICE Device)
 {
     NTSTATUS status;
     WDFUSBDEVICE usbDevice;
     PDEVICE_CONTEXT ctx;
-    UCHAR numInterfaces;
     WDFUSBINTERFACE usbInterface;
+    UCHAR numEndpoints;
     UCHAR i;
     WDF_USB_PIPE_INFORMATION pi;
     WDFUSBPIPE pipe;
-    WDF_USB_CONTINUOUS_READER_CONFIG contReaderConfig;
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS configParams;
 
-    // Create USB device object using WDF. Avoid newer create-config helpers
-    // which may not be present in older KMDF 1.9 headers.
-    status = WdfUsbTargetDeviceCreate(Device, WDF_NO_OBJECT_ATTRIBUTES, &usbDevice);
+    ctx = DeviceGetContext(Device);
+    if (!ctx) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Default configuration
+    ctx->UsbConfig.ReadBufferSize = 16384;
+    ctx->UsbConfig.NumReaders = 2;
+    ctx->UsbConfig.TransferTimeoutMs = 5000;
+    ctx->UsbConfig.RetryCount = 3;
+
+    // Create USB device object if not already created
+    if (ctx->UsbDevice == NULL) {
+        status = WdfUsbTargetDeviceCreate(Device, WDF_NO_OBJECT_ATTRIBUTES, &usbDevice);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("MTP: WdfUsbTargetDeviceCreate failed 0x%08x\n", status));
+            return status;
+        }
+        ctx->UsbDevice = usbDevice;
+    }
+
+    // Select single interface configuration
+    WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_SINGLE_INTERFACE(&configParams);
+    status = WdfUsbTargetDeviceSelectConfig(ctx->UsbDevice, WDF_NO_OBJECT_ATTRIBUTES, &configParams);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("MTP: WdfUsbTargetDeviceCreate failed 0x%08x\n", status));
+        KdPrint(("MTP: WdfUsbTargetDeviceSelectConfig failed 0x%08x\n", status));
         return status;
     }
 
-    // Save the usb device handle in context early
-    ctx = DeviceGetContext(Device);
-    ctx->UsbDevice = usbDevice;
-    // mark USB as present
-    ctx->UsbPresent = TRUE;
-
-    // Select first configuration and find bulk endpoints (simplified)
-    numInterfaces = WdfUsbTargetDeviceGetNumInterfaces(usbDevice);
-    if (numInterfaces == 0) {
-        KdPrint(("MTP: No USB interfaces found\n"));
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    }
-
-    usbInterface = WdfUsbTargetDeviceGetInterface(usbDevice, 0);
+    usbInterface = configParams.Types.SingleInterface.ConfiguredUsbInterface;
     if (usbInterface == NULL) {
-        KdPrint(("MTP: GetInterface failed\n"));
+        KdPrint(("MTP: No configured USB interface found\n"));
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
     ctx->UsbInterface = usbInterface;
+    numEndpoints = WdfUsbInterfaceGetNumEndpoints(usbInterface, 0);
+    KdPrint(("MTP: Configured interface has %u endpoints\n", (ULONG)numEndpoints));
 
-    // store default config if none provided
-    if (Config) {
-        ctx->UsbConfig = *Config;
-    } else {
-        ctx->UsbConfig.ReadBufferSize = 4096;
-        ctx->UsbConfig.NumReaders = 2;
-        ctx->UsbConfig.TransferTimeoutMs = 5000;
-        ctx->UsbConfig.RetryCount = 3;
-    }
-
-    // Find bulk pipes and configure a continuous reader on the IN pipe
-    for (i = 0; i < WdfUsbInterfaceGetNumEndpoints(usbInterface, 0); i++) {
+    // Find bulk pipes
+    for (i = 0; i < numEndpoints; i++) {
         WDF_USB_PIPE_INFORMATION_INIT(&pi);
         pipe = WdfUsbInterfaceGetConfiguredPipe(usbInterface, i, &pi);
-        WdfUsbTargetPipeGetInformation(pipe, &pi);
+        if (pipe == NULL) {
+            continue;
+        }
 
         if (pi.PipeType == WdfUsbPipeTypeBulk) {
             if (WdfUsbTargetPipeIsInEndpoint(pipe)) {
-                // Bulk IN
                 ctx->BulkInPipe = pipe;
                 ctx->MaxPacketSize = pi.MaximumPacketSize;
-
-                // Configure continuous reader (reader will be started in D0Entry)
-                WDF_USB_CONTINUOUS_READER_CONFIG_INIT(&contReaderConfig, MtpEvtUsbReadComplete, Device, ctx->UsbConfig.ReadBufferSize);
-                contReaderConfig.NumPendingReads = (UCHAR)ctx->UsbConfig.NumReaders;
-
-                status = WdfUsbTargetPipeConfigContinuousReader(ctx->BulkInPipe, &contReaderConfig);
-                if (!NT_SUCCESS(status)) {
-                    KdPrint(("MTP: Failed to configure continuous reader 0x%08x\n", status));
-                }
-
+                KdPrint(("MTP: Bulk IN pipe configured, MaxPacket=%u\n", ctx->MaxPacketSize));
             } else {
                 ctx->BulkOutPipe = pipe;
+                KdPrint(("MTP: Bulk OUT pipe configured\n"));
             }
         }
     }
 
-    KdPrint(("MTP: USB device created and pipes located\n"));
+    ctx->UsbPresent = TRUE;
+    KdPrint(("MTP: USB hardware prepared successfully\n"));
     return STATUS_SUCCESS;
 }
 
-// Simple synchronous bulk write (blocking) with retry logic and device presence check
-// Returns STATUS_INVALID_DEVICE_STATE if device is marked as absent (disconnected)
+NTSTATUS
+MtpUsb_ReleaseHardware(WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT ctx;
+
+    ctx = DeviceGetContext(Device);
+    if (ctx) {
+        ctx->UsbPresent = FALSE;
+        ctx->BulkInPipe = NULL;
+        ctx->BulkOutPipe = NULL;
+        ctx->UsbInterface = NULL;
+        ctx->UsbDevice = NULL;
+    }
+
+    KdPrint(("MTP: USB hardware released\n"));
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+MtpUsb_Create(WDFDEVICE Device, PMTP_USB_CONFIG Config)
+{
+    PDEVICE_CONTEXT ctx;
+
+    ctx = DeviceGetContext(Device);
+    if (ctx && Config) {
+        ctx->UsbConfig = *Config;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 MtpUsb_WriteBulk(
     WDFDEVICE Device,
@@ -107,112 +129,95 @@ MtpUsb_WriteBulk(
     )
 {
     PDEVICE_CONTEXT ctx;
-    ULONG retries;
     NTSTATUS status;
-    ULONG attempt;
-    WDFREQUEST request;
-    WDFMEMORY memory;
-    WDF_OBJECT_ATTRIBUTES memAttrib;
-    
+    WDF_MEMORY_DESCRIPTOR memDesc;
+    ULONG bytesWritten = 0;
+    WDF_REQUEST_SEND_OPTIONS sendOptions;
+    ULONG timeout;
+
     if (!Buffer || Length == 0 || !Device || !Pipe) {
         return STATUS_INVALID_PARAMETER;
     }
 
     ctx = DeviceGetContext(Device);
-    
-    // Check if device is still present
     if (!ctx || !ctx->UsbPresent) {
         KdPrint(("MTP: USB device not present, aborting write\n"));
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    // Create memory object from preallocated buffer
-    WDF_OBJECT_ATTRIBUTES_INIT(&memAttrib);
-    memAttrib.ParentObject = Device;
-    status = WdfMemoryCreatePreallocated(&memAttrib, Buffer, (size_t)Length, &memory);
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 5000;
+
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)Length);
+
+    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, 0);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(timeout));
+
+    status = WdfUsbTargetPipeWriteSynchronously(
+        Pipe,
+        NULL,
+        &sendOptions,
+        &memDesc,
+        &bytesWritten
+    );
+
     if (!NT_SUCCESS(status)) {
-        KdPrint(("MTP: WdfMemoryCreatePreallocated failed 0x%08x\n", status));
-        return status;
+        KdPrint(("MTP: WdfUsbTargetPipeWriteSynchronously failed 0x%08x\n", status));
     }
 
-    retries = ctx->UsbConfig.RetryCount;
-    status = STATUS_UNSUCCESSFUL;
-
-    for (attempt = 0; attempt <= retries; ++attempt) {
-        // Re-check device presence before each retry
-        if (!ctx->UsbPresent) {
-            WdfObjectDelete(memory);
-            return STATUS_INVALID_DEVICE_STATE;
-        }
-
-        request = NULL;
-        status = WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES, WdfUsbTargetPipeGetIoTarget(Pipe), &request);
-        if (!NT_SUCCESS(status)) {
-            if (attempt == retries) {
-                KdPrint(("MTP: WdfRequestCreate failed 0x%08x on final attempt\n", status));
-                WdfObjectDelete(memory);
-                return status;
-            }
-            continue;
-        }
-
-        status = WdfUsbTargetPipeFormatRequestForWrite(Pipe, request, memory, NULL);
-        if (!NT_SUCCESS(status)) {
-            WdfObjectDelete(request);
-            if (attempt == retries) {
-                KdPrint(("MTP: WdfUsbTargetPipeFormatRequestForWrite failed 0x%08x\n", status));
-                WdfObjectDelete(memory);
-                return status;
-            }
-            continue;
-        }
-
-        if (!WdfRequestSend(request, WdfUsbTargetPipeGetIoTarget(Pipe), NULL)) {
-            status = WdfRequestGetStatus(request);
-            WdfObjectDelete(request);
-            
-            // Check for device gone status codes
-            if (status == STATUS_CANCELLED || status == STATUS_DEVICE_NOT_CONNECTED ||
-                status == STATUS_NO_SUCH_DEVICE || status == STATUS_IO_DEVICE_ERROR) {
-                ctx->UsbPresent = FALSE;
-                KdPrint(("MTP: Device disconnected or I/O error 0x%08x\n", status));
-                WdfObjectDelete(memory);
-                return STATUS_INVALID_DEVICE_STATE;
-            }
-            
-            // Also check for device timeout which may indicate disconnection
-            if (status == STATUS_IO_TIMEOUT) {
-                KdPrint(("MTP: I/O timeout (possible disconnection): 0x%08x\n", status));
-                // Don't immediately mark as absent, but return the timeout
-                WdfObjectDelete(memory);
-                return status;
-            }
-            
-            if (attempt == retries) {
-                KdPrint(("MTP: WdfRequestSend failed 0x%08x on final attempt\n", status));
-                WdfObjectDelete(memory);
-                return status;
-            }
-            continue;
-        }
-
-        WdfObjectDelete(request);
-
-        if (NT_SUCCESS(status)) {
-            WdfObjectDelete(memory);
-            return status;  // Success
-        }
-        
-        // transient failure: try again (no long delay to keep driver responsive)
-    }
-
-    KdPrint(("MTP: WriteBulk exhausted all retries, last status 0x%08x\n", status));
-    WdfObjectDelete(memory);
     return status;
 }
 
+NTSTATUS
+MtpUsb_ReadBulk(
+    IN WDFDEVICE Device,
+    IN WDFUSBPIPE Pipe,
+    IN PVOID Buffer,
+    IN size_t BufferLength,
+    OUT PULONG BytesRead
+    )
+{
+    PDEVICE_CONTEXT ctx;
+    NTSTATUS status;
+    WDF_MEMORY_DESCRIPTOR memDesc;
+    ULONG bytesTransferred;
+    WDF_REQUEST_SEND_OPTIONS sendOptions;
+    ULONG timeout;
 
-// Read helper (continuous reader completion) used for event and response processing
+    bytesTransferred = 0;
+    if (BytesRead) *BytesRead = 0;
+    if (!Buffer || BufferLength == 0 || !Device || !Pipe) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ctx = DeviceGetContext(Device);
+    if (!ctx || !ctx->UsbPresent) {
+        KdPrint(("MTP: USB device not present, aborting read\n"));
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 5000;
+
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)BufferLength);
+
+    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, 0);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(timeout));
+
+    status = WdfUsbTargetPipeReadSynchronously(
+        Pipe,
+        NULL,
+        &sendOptions,
+        &memDesc,
+        &bytesTransferred
+    );
+
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: WdfUsbTargetPipeReadSynchronously failed 0x%08x\n", status));
+    }
+
+    if (BytesRead) *BytesRead = bytesTransferred;
+    return status;
+}
+
 VOID
 MtpEvtUsbReadComplete(
     WDFUSBPIPE  Pipe,
@@ -227,37 +232,34 @@ MtpEvtUsbReadComplete(
     UNREFERENCED_PARAMETER(Pipe);
     
     device = (WDFDEVICE)Context;
-
     if (NumBytesTransferred == 0) return;
 
     data = WdfMemoryGetBuffer(Buffer, NULL);
-
-    // Hand the buffer to the MTP core module (the core will parse containers)
     MtpUsb_OnDataReceived(device, data, NumBytesTransferred);
-
 }
 
-// Start/Stop readers
 NTSTATUS
 MtpUsb_StartReaders(WDFDEVICE Device)
 {
-    PDEVICE_CONTEXT ctx;
-    
-    ctx = DeviceGetContext(Device);
-    if (!ctx || !ctx->BulkInPipe) return STATUS_INVALID_DEVICE_STATE;
-    return WdfIoTargetStart(WdfUsbTargetPipeGetIoTarget(ctx->BulkInPipe));
+    UNREFERENCED_PARAMETER(Device);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
 MtpUsb_StopReaders(WDFDEVICE Device)
 {
-    PDEVICE_CONTEXT ctx;
-    
-    ctx = DeviceGetContext(Device);
-    if (!ctx || !ctx->BulkInPipe) return STATUS_INVALID_DEVICE_STATE;
-    WdfIoTargetStop(WdfUsbTargetPipeGetIoTarget(ctx->BulkInPipe), 0);
+    UNREFERENCED_PARAMETER(Device);
     return STATUS_SUCCESS;
 }
 
-WDFUSBPIPE MtpUsb_GetBulkInPipe(WDFDEVICE Device) { return DeviceGetContext(Device)->BulkInPipe; }
-WDFUSBPIPE MtpUsb_GetBulkOutPipe(WDFDEVICE Device) { return DeviceGetContext(Device)->BulkOutPipe; }
+WDFUSBPIPE MtpUsb_GetBulkInPipe(WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT ctx = DeviceGetContext(Device);
+    return ctx ? ctx->BulkInPipe : NULL;
+}
+
+WDFUSBPIPE MtpUsb_GetBulkOutPipe(WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT ctx = DeviceGetContext(Device);
+    return ctx ? ctx->BulkOutPipe : NULL;
+}
