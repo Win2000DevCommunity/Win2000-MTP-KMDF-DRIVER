@@ -272,6 +272,7 @@ Win2000-MTP-KMDF-DRIVER/
 ├── build_w2k_kmdf.bat        # Driver build script (KMDF 1.9, /GS-)
 ├── create_iso.ps1            # ISO image generator for VM deployment
 ├── create_two_releases.ps1   # Release package builder (BareMetal + QEMU)
+├── create_release_zip.ps1    # Monolithic full release package builder
 ├── run_w2k_qemu.bat          # QEMU VM launcher with USB-MTP emulation
 │
 ├── user_app/

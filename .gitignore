@@ -19,6 +19,7 @@
 *.pch
 *.idb
 *.exe
+*.sys
 
 # --- Build output directories ---
 obj/
@@ -106,3 +107,30 @@ temp_driver_push/
 # --- Preprocessed source copies (huge, generated) ---
 *_pp.c
 *_pp.i
+
+# --- Obsolete build scripts & superseded documentation ---
+BUILD_*.bat
+build_debug.bat
+build_driver.bat
+build_manual.bat
+build_stub.bat
+build_w2k.bat
+build_win7ddk.bat
+clean.bat
+compile_*.bat
+check_include.bat
+makefile
+sources
+user/
+user_app/build.bat
+user_app/build_gui.bat
+user_app/menu.bat
+*.w2k
+BUILD_INSTRUCTIONS.txt
+README_BUILD.txt
+README_HEADERS.txt
+W2K_COMPATIBILITY_REPORT.txt
+PROTOCOL_MISMATCH_FIX.md
+RELAY_TIMEOUT_ANALYSIS.md
+TIMEOUT_FIX_SUMMARY.md
+
