@@ -71,6 +71,8 @@ test_gui_live.py
 test_mtp_full.py
 test_normal_boot.py
 test_search_live.py
+test_search_live_qemu.py
+test_gui_search_clean.py
 test_suite_live.py
 switch_boot_mode.py
 patch_vm_boot.py
