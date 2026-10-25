@@ -2891,6 +2891,37 @@ static BOOL AddSearchResult(const SEARCH_ITEM *pItem)
     return TRUE;
 }
 
+static WNDPROC g_pfnOldSearchEditProc = NULL;
+static LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == WM_GETDLGCODE) {
+        return DLGC_WANTALLKEYS | DLGC_WANTCHARS;
+    }
+    /* WM_KEYDOWN fires BEFORE WM_CHAR in the Windows message pipeline.
+     * We must trigger Find Now here, not in WM_CHAR (which never arrives
+     * for VK_RETURN if we consume the keydown). */
+    if (uMsg == WM_KEYDOWN) {
+        if (wParam == VK_RETURN) {
+            HWND hParent = GetParent(hWnd);
+            if (hParent) {
+                SendMessage(hParent, WM_COMMAND,
+                            MAKEWPARAM(IDC_SEARCH_BTN_FINDNOW, BN_CLICKED), 0);
+            }
+            return 0;   /* consumed — do not pass to edit control */
+        }
+        if (wParam == VK_ESCAPE) {
+            DestroyWindow(GetParent(hWnd));
+            return 0;
+        }
+    }
+    /* Suppress the '\r' WM_CHAR that TranslateMessage may still generate
+     * (prevents the default edit-control "ding" beep). */
+    if (uMsg == WM_CHAR && wParam == '\r') {
+        return 0;
+    }
+    return CallWindowProcA(g_pfnOldSearchEditProc, hWnd, uMsg, wParam, lParam);
+}
+
 static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     static HWND hEditName = NULL;
@@ -2930,9 +2961,10 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 SendMessage(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
                 hEditName = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "*",
-                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     20, 40, 405, 21, hWnd, (HMENU)IDC_SEARCH_EDIT_NAME, g_hInstance, NULL);
                 SendMessage(hEditName, WM_SETFONT, (WPARAM)hFont, TRUE);
+                g_pfnOldSearchEditProc = (WNDPROC)SetWindowLongA(hEditName, GWL_WNDPROC, (LONG)SearchEditSubclassProc);
             }
 
             /* Look in Label & Combo */
@@ -2942,7 +2974,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 SendMessage(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
                 hComboLookIn = CreateWindowExA(0, "COMBOBOX", "",
-                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                     75, 66, 350, 150, hWnd, (HMENU)IDC_SEARCH_COMBO_LOOKIN, g_hInstance, NULL);
                 SendMessage(hComboLookIn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -2959,7 +2991,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 SendMessage(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
                 hComboType = CreateWindowExA(0, "COMBOBOX", "",
-                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                     75, 94, 200, 150, hWnd, (HMENU)IDC_SEARCH_COMBO_TYPE, g_hInstance, NULL);
                 SendMessage(hComboType, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -2973,41 +3005,41 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             }
 
             /* Include Subfolders Checkbox */
-            hChkSubfolders = CreateWindowExA(0, "BUTTON", "Include subfolders",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            hChkSubfolders = CreateWindowExA(0, "BUTTON", "&Include subfolders",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 290, 96, 135, 18, hWnd, (HMENU)IDC_SEARCH_CHK_SUBFOLDERS, g_hInstance, NULL);
             SendMessage(hChkSubfolders, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(hChkSubfolders, BM_SETCHECK, BST_CHECKED, 0);
 
             /* Right Action Buttons */
-            hBtnFindNow = CreateWindowExA(0, "BUTTON", "Find Now",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            hBtnFindNow = CreateWindowExA(0, "BUTTON", "&Find Now",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 450, 14, 110, 23, hWnd, (HMENU)IDC_SEARCH_BTN_FINDNOW, g_hInstance, NULL);
             SendMessage(hBtnFindNow, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            hBtnStop = CreateWindowExA(0, "BUTTON", "Stop",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+            hBtnStop = CreateWindowExA(0, "BUTTON", "&Stop",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
                 450, 40, 110, 23, hWnd, (HMENU)IDC_SEARCH_BTN_STOP, g_hInstance, NULL);
             SendMessage(hBtnStop, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            hBtnNew = CreateWindowExA(0, "BUTTON", "New Search",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            hBtnNew = CreateWindowExA(0, "BUTTON", "&New Search",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 450, 66, 110, 23, hWnd, (HMENU)IDC_SEARCH_BTN_NEW, g_hInstance, NULL);
             SendMessage(hBtnNew, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            hBtnOpen = CreateWindowExA(0, "BUTTON", "Open Folder",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            hBtnOpen = CreateWindowExA(0, "BUTTON", "&Open Folder",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 450, 92, 110, 23, hWnd, (HMENU)IDC_SEARCH_BTN_OPEN, g_hInstance, NULL);
             SendMessage(hBtnOpen, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            hBtnDownload = CreateWindowExA(0, "BUTTON", "Download...",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            hBtnDownload = CreateWindowExA(0, "BUTTON", "&Download...",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 450, 118, 110, 23, hWnd, (HMENU)IDC_SEARCH_BTN_DOWNLOAD, g_hInstance, NULL);
             SendMessage(hBtnDownload, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             /* Results ListView */
             hListView = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
-                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER,
                 10, 150, 550, 275, hWnd, (HMENU)IDC_SEARCH_LISTVIEW, g_hInstance, NULL);
             ListView_SetExtendedListViewStyle(hListView,
                 LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_HEADERDRAGDROP);
@@ -3048,6 +3080,9 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             SendMessageA(hStatusBar, SB_SETTEXTA, 1, (LPARAM)"0 item(s) found");
             SendMessageA(hStatusBar, SB_SETTEXTA, 2, (LPARAM)"0 scanned");
 
+            SetFocus(hEditName);
+            SendMessage(hEditName, EM_SETSEL, 0, -1);
+
             return 0;
         }
 
@@ -3074,8 +3109,17 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             return 0;
         }
 
+        case DM_GETDEFID:
+            return MAKELRESULT(IDC_SEARCH_BTN_FINDNOW, DC_HASDEFID);
+
         case WM_COMMAND: {
             WORD id = LOWORD(wParam);
+            if (id == IDOK) {
+                id = IDC_SEARCH_BTN_FINDNOW;
+            } else if (id == IDCANCEL) {
+                SendMessage(hWnd, WM_CLOSE, 0, 0);
+                return 0;
+            }
 
             if (id == IDC_SEARCH_BTN_STOP) {
                 g_bStopSearch = TRUE;
@@ -3091,6 +3135,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 SendMessageA(hStatusBar, SB_SETTEXTA, 1, (LPARAM)"0 item(s) found");
                 SendMessageA(hStatusBar, SB_SETTEXTA, 2, (LPARAM)"0 scanned");
                 SetFocus(hEditName);
+                SendMessage(hEditName, EM_SETSEL, 0, -1);
                 return 0;
             }
 
@@ -3178,8 +3223,11 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     params[2] = curr.Handle;
 
                     if (!MtpSendOperation(MTP_OP_GET_OBJECT_HANDLES, params, 3, NULL, 0,
-                                          handleBuffer, 65536, &bytesRet)) {
-                        continue;
+                                          handleBuffer, 65536, &bytesRet) || bytesRet < sizeof(DWORD)) {
+                        if (curr.Handle == 0) {
+                            DeviceIoControl(g_hDevice, IOCTL_MTP_LIST_OBJECTS, NULL, 0,
+                                            handleBuffer, 65536, &bytesRet, NULL);
+                        }
                     }
 
                     if (bytesRet < sizeof(DWORD)) continue;
@@ -3464,7 +3512,7 @@ void ShowSearchDialog(HWND hWndParent)
     }
 
     g_hSearchDlg = CreateWindowExA(
-        WS_EX_APPWINDOW,
+        WS_EX_APPWINDOW | WS_EX_CONTROLPARENT,
         "MtpSearchWindow", "Find: Files or Folders on Portable Device",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
         x, y, w, h,
@@ -4366,7 +4414,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     if (g_hListView) SetFocus(g_hListView);
 
+    /* Open Search dialog immediately if /search or -search flag is passed */
+    if (lpCmdLine && (strstr(lpCmdLine, "/search") || strstr(lpCmdLine, "-search") || strstr(lpCmdLine, "/find"))) {
+        ShowSearchDialog(g_hMainWnd);
+    }
+
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
+        if (g_hSearchDlg && IsWindow(g_hSearchDlg) && IsDialogMessageA(g_hSearchDlg, &msg)) {
+            continue;
+        }
         if (!hAccel || !TranslateAcceleratorA(g_hMainWnd, hAccel, &msg)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
