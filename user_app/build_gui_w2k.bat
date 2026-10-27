@@ -8,7 +8,7 @@ set INCLUDE=%SDKROOT%\Include;%DDKROOT%\inc\crt
 set LIB=%SDKROOT%\Lib;%DDKROOT%\lib\w2k\i386;%DDKROOT%\lib\crt\i386
 
 set CFLAGS=/nologo /O2 /W3 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 /D_WIN32_IE=0x0500
-set GUI_LIBS=kernel32.lib user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib advapi32.lib BufferOverflowU.lib
+set GUI_LIBS=kernel32.lib user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib BufferOverflowU.lib
 set CONSOLE_LIBS=kernel32.lib user32.lib advapi32.lib BufferOverflowU.lib
 
 cd /d "%~dp0"

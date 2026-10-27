@@ -27,6 +27,8 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <dbt.h>
+#include <ole2.h>
+#include <olectl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,21 +287,41 @@ static int g_NavHistoryCount = 0;
 #define WM_TRAY_NOTIFY         (WM_APP + 50)
 #define TIMER_TRAY_DISMISS     2001
 #define TIMER_DEVICE_CHECK     2002
+#define TIMER_PREVIEW_DEBOUNCE 2003
+#define WM_USER_PREVIEW_READY  (WM_USER + 101)
+
+#define PREVIEW_BOX_W          126
+#define PREVIEW_BOX_H          91
+#define PREVIEW_CACHE_MAX      16
 
 static BOOL g_bTrayIconAdded = FALSE;
 
 /* Drag and Drop Subclassing */
 static WNDPROC g_pfnOrigListViewProc = NULL;
 
-/* Asynchronous Enumeration and Device Notification Globals */
+/* Asynchronous Enumeration, Device Notification, and Preview Globals */
 static HANDLE g_hEnumThread = NULL;
 static LONG g_CancelEnum = 0;
 static LONG g_IsEnumerating = 0;
 static volatile BOOL g_bSearchRunning = FALSE;
 static volatile BOOL g_bStopSearch = FALSE;
+static volatile BOOL g_bTransferRunning = FALSE;
 static CRITICAL_SECTION g_ObjectsCs;
 static CRITICAL_SECTION g_DeviceCs;
 static HDEVNOTIFY g_hDevNotify = NULL;
+
+typedef struct _PREVIEW_CACHE_ENTRY {
+    DWORD Handle;
+    HBITMAP hBitmap;
+    DWORD LastAccess;
+} PREVIEW_CACHE_ENTRY;
+
+static PREVIEW_CACHE_ENTRY g_PreviewCache[PREVIEW_CACHE_MAX];
+static CRITICAL_SECTION g_PreviewCs;
+static DWORD g_CurrentPreviewHandle = 0;
+static HANDLE g_hPreviewThread = NULL;
+static LONG g_CancelPreview = 0;
+static const IID IID_IPicture_Local = { 0x7bf80980, 0xbf32, 0x101a, { 0x8b, 0xbb, 0x00, 0xaa, 0x00, 0x30, 0x0c, 0xab } };
 
 /* Explorer UI and Settings Options */
 static BOOL g_bNotifyOnCopyPaste = FALSE;
@@ -371,6 +393,10 @@ void SortObjectList(int column, BOOL toggle);
 void UpdateColumnHeaders(void);
 void PopulateArrangeMenu(HMENU hArrangeMenu);
 void UpdateSortMenu(HWND hWnd);
+static HBITMAP GetCachedPreview(DWORD handle);
+static void ClearPreviewCache(void);
+static BOOL IsImageObject(const OBJECT_ITEM *obj);
+static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam);
 
 static BOOL g_bDebugConsole = FALSE;
 
@@ -1096,6 +1122,17 @@ void DisconnectDevice(void)
         g_hEnumThread = NULL;
     }
 
+    /* Cancel and terminate any active preview worker thread */
+    InterlockedExchange(&g_CancelPreview, 1);
+    if (g_hMainWnd) KillTimer(g_hMainWnd, TIMER_PREVIEW_DEBOUNCE);
+    if (g_hPreviewThread) {
+        WaitForSingleObject(g_hPreviewThread, 200);
+        CloseHandle(g_hPreviewThread);
+        g_hPreviewThread = NULL;
+    }
+    ClearPreviewCache();
+    g_CurrentPreviewHandle = 0;
+
     if (g_hDevNotify) {
         UnregisterDeviceNotification(g_hDevNotify);
         g_hDevNotify = NULL;
@@ -1341,6 +1378,11 @@ BOOL RefreshObjects(void)
     }
 
     InterlockedExchange(&g_CancelEnum, 0);
+
+    /* Cancel any active preview worker */
+    InterlockedExchange(&g_CancelPreview, 1);
+    if (g_hMainWnd) KillTimer(g_hMainWnd, TIMER_PREVIEW_DEBOUNCE);
+    g_CurrentPreviewHandle = 0;
 
     /* Clear listview items immediately */
     EnterCriticalSection(&g_ObjectsCs);
@@ -1784,10 +1826,14 @@ BOOL DownloadObjectToFile(HWND hWnd, DWORD handle, ULONGLONG totalSize, const ch
         if (!quiet) MessageBoxA(hWnd, "Failed to create destination file.", "Download Error", MB_OK | MB_ICONERROR);
         return FALSE;
     }
+
+    g_bTransferRunning = TRUE;
+    InterlockedExchange(&g_CancelPreview, 1);
     
     chunkBuffer = (BYTE*)malloc(g_OptimalChunkSize);
     if (!chunkBuffer) {
         CloseHandle(hFile);
+        g_bTransferRunning = FALSE;
         if (!quiet) MessageBoxA(hWnd, "Out of memory for transfer buffer.", "Download Error", MB_OK | MB_ICONERROR);
         return FALSE;
     }
@@ -1814,6 +1860,7 @@ BOOL DownloadObjectToFile(HWND hWnd, DWORD handle, ULONGLONG totalSize, const ch
         if (!bPartOk || bytesReturned == 0) {
             free(chunkBuffer);
             CloseHandle(hFile);
+            g_bTransferRunning = FALSE;
             if (!quiet) MessageBoxA(hWnd, "Error reading file data stream from MTP device.", "Transfer Error", MB_OK | MB_ICONERROR);
             return FALSE;
         }
@@ -1856,6 +1903,7 @@ BOOL DownloadObjectToFile(HWND hWnd, DWORD handle, ULONGLONG totalSize, const ch
     UpdateUI();
     
     if (g_CancelTransfer) {
+        g_bTransferRunning = FALSE;
         SetStatus("Transfer canceled by user");
         if (!quiet) MessageBoxA(hWnd, "Download canceled.", "MTP Transfer", MB_OK | MB_ICONEXCLAMATION);
         return FALSE;
@@ -1876,6 +1924,7 @@ BOOL DownloadObjectToFile(HWND hWnd, DWORD handle, ULONGLONG totalSize, const ch
                   displayName, sizeStr, speedStr, g_szUsbSpeed, g_OptimalChunkSize / 1024, elapsed);
         MessageBoxA(hWnd, statusBuf, "Transfer Complete", MB_OK | MB_ICONINFORMATION);
     }
+    g_bTransferRunning = FALSE;
     return TRUE;
 }
 
@@ -2158,6 +2207,9 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
         MessageBoxA(hWnd, errBuf, "Upload Error", MB_OK | MB_ICONERROR);
         return FALSE;
     }
+
+    g_bTransferRunning = TRUE;
+    InterlockedExchange(&g_CancelPreview, 1);
     
     liSize.LowPart = GetFileSize(hFile, (LPDWORD)&liSize.HighPart);
     fileSize = (ULONGLONG)liSize.QuadPart;
@@ -2213,6 +2265,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
     if (!MtpSendOperation(MTP_OP_SEND_OBJECT_INFO, sendParams, 2, objInfoBuf, objInfoLen,
                           respBuf, sizeof(respBuf), &respBytes)) {
         CloseHandle(hFile);
+        g_bTransferRunning = FALSE;
         MessageBoxA(hWnd, "Failed to initiate upload on MTP device (SendObjectInfo failed).", "Upload Error", MB_OK | MB_ICONERROR);
         return FALSE;
     }
@@ -2223,6 +2276,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
     readBuffer = (BYTE*)malloc(g_OptimalChunkSize);
     if (!readBuffer) {
         CloseHandle(hFile);
+        g_bTransferRunning = FALSE;
         MessageBoxA(hWnd, "Out of memory for transfer buffer.", "Upload Error", MB_OK | MB_ICONERROR);
         return FALSE;
     }
@@ -2262,6 +2316,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
         if (!payload) {
             free(readBuffer);
             CloseHandle(hFile);
+            g_bTransferRunning = FALSE;
             return FALSE;
         }
         
@@ -2278,6 +2333,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
             free(payload);
             free(readBuffer);
             CloseHandle(hFile);
+            g_bTransferRunning = FALSE;
             {
                 char errMsg[256];
                 _snprintf(errMsg, sizeof(errMsg), "Failed to write data stream to MTP device.\nGetLastError=%lu  offset=%lu  totalSize=%lu",
@@ -2330,6 +2386,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
     UpdateUI();
     
     if (g_CancelTransfer) {
+        g_bTransferRunning = FALSE;
         SetStatus("Upload canceled by user");
         MessageBoxA(hWnd, "Upload canceled.", "MTP Transfer", MB_OK | MB_ICONEXCLAMATION);
         return FALSE;
@@ -2343,6 +2400,7 @@ BOOL UploadSingleFilePath(HWND hWnd, const char *szFile)
     _snprintf(statusBuf, sizeof(statusBuf), "Upload complete - %s at %s (%s, chunk %luKB)",
               sizeStr, speedStr, g_szUsbSpeed, g_OptimalChunkSize / 1024);
     SetStatus(statusBuf);
+    g_bTransferRunning = FALSE;
     return TRUE;
 }
 
@@ -2421,6 +2479,315 @@ BOOL DeleteSelected(HWND hWnd)
     SetStatus("Object deleted");
     RefreshObjects();
     return TRUE;
+}
+
+/* ============================================================================
+ * High-Performance Image Preview System (Asynchronous + Cached)
+ * ============================================================================ */
+
+static HBITMAP LoadImageFromMemory(const BYTE *pData, DWORD dwSize, int maxW, int maxH)
+{
+    HGLOBAL hMem;
+    IStream *pStream;
+    IPicture *pPicture;
+    HRESULT hr;
+    HBITMAP hResultBmp;
+    HDC hdcScreen;
+    HDC hdcDst;
+    long hmWidth, hmHeight;
+    int srcW, srcH;
+    int dstW, dstH;
+    int posX, posY;
+    HBITMAP hOldDst;
+    RECT rcDst;
+    void *pLock;
+
+    hResultBmp = NULL;
+    if (!pData || dwSize == 0) return NULL;
+
+    hMem = GlobalAlloc(GMEM_MOVEABLE, dwSize);
+    if (!hMem) return NULL;
+
+    pLock = GlobalLock(hMem);
+    if (!pLock) {
+        GlobalFree(hMem);
+        return NULL;
+    }
+    memcpy(pLock, pData, dwSize);
+    GlobalUnlock(hMem);
+
+    pStream = NULL;
+    hr = CreateStreamOnHGlobal(hMem, TRUE, &pStream);
+    if (FAILED(hr) || !pStream) {
+        GlobalFree(hMem);
+        return NULL;
+    }
+
+    pPicture = NULL;
+    hr = OleLoadPicture(pStream, dwSize, FALSE, &IID_IPicture_Local, (void**)&pPicture);
+    pStream->lpVtbl->Release(pStream);
+    if (FAILED(hr) || !pPicture) {
+        return NULL;
+    }
+
+    hmWidth = 0;
+    hmHeight = 0;
+    pPicture->lpVtbl->get_Width(pPicture, &hmWidth);
+    pPicture->lpVtbl->get_Height(pPicture, &hmHeight);
+
+    hdcScreen = GetDC(NULL);
+    if (hdcScreen) {
+        srcW = MulDiv(hmWidth, GetDeviceCaps(hdcScreen, LOGPIXELSX), 2540);
+        srcH = MulDiv(hmHeight, GetDeviceCaps(hdcScreen, LOGPIXELSY), 2540);
+
+        if (srcW > 0 && srcH > 0 && maxW > 0 && maxH > 0) {
+            double aspect = (double)srcW / (double)srcH;
+            if (aspect >= ((double)maxW / (double)maxH)) {
+                dstW = maxW;
+                dstH = (int)((double)maxW / aspect);
+                if (dstH < 1) dstH = 1;
+            } else {
+                dstH = maxH;
+                dstW = (int)((double)maxH * aspect);
+                if (dstW < 1) dstW = 1;
+            }
+
+            hdcDst = CreateCompatibleDC(hdcScreen);
+            if (hdcDst) {
+                hResultBmp = CreateCompatibleBitmap(hdcScreen, maxW, maxH);
+                if (hResultBmp) {
+                    hOldDst = (HBITMAP)SelectObject(hdcDst, hResultBmp);
+
+                    rcDst.left = 0; rcDst.top = 0; rcDst.right = maxW; rcDst.bottom = maxH;
+                    FillRect(hdcDst, &rcDst, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+                    posX = (maxW - dstW) / 2;
+                    posY = (maxH - dstH) / 2;
+
+                    pPicture->lpVtbl->Render(pPicture,
+                                             hdcDst,
+                                             posX, posY, dstW, dstH,
+                                             0, hmHeight, hmWidth, -hmHeight,
+                                             NULL);
+
+                    SelectObject(hdcDst, hOldDst);
+                }
+                DeleteDC(hdcDst);
+            }
+        }
+        ReleaseDC(NULL, hdcScreen);
+    }
+
+    pPicture->lpVtbl->Release(pPicture);
+    return hResultBmp;
+}
+
+static HBITMAP GetCachedPreview(DWORD handle)
+{
+    HBITMAP hBmp;
+    int i;
+    hBmp = NULL;
+    if (handle == 0) return NULL;
+
+    EnterCriticalSection(&g_PreviewCs);
+    for (i = 0; i < PREVIEW_CACHE_MAX; i++) {
+        if (g_PreviewCache[i].Handle == handle && g_PreviewCache[i].hBitmap != NULL) {
+            g_PreviewCache[i].LastAccess = GetTickCount();
+            hBmp = g_PreviewCache[i].hBitmap;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_PreviewCs);
+    return hBmp;
+}
+
+static void AddCachedPreview(DWORD handle, HBITMAP hBmp)
+{
+    int i, target;
+    DWORD oldestTick;
+
+    target = -1;
+    oldestTick = 0xFFFFFFFF;
+    if (handle == 0 || !hBmp) return;
+
+    EnterCriticalSection(&g_PreviewCs);
+    for (i = 0; i < PREVIEW_CACHE_MAX; i++) {
+        if (g_PreviewCache[i].Handle == handle) {
+            target = i;
+            break;
+        }
+        if (g_PreviewCache[i].Handle == 0 && target == -1) {
+            target = i;
+        }
+        if (g_PreviewCache[i].LastAccess < oldestTick) {
+            oldestTick = g_PreviewCache[i].LastAccess;
+            if (target == -1 || g_PreviewCache[target].Handle != 0) {
+                target = i;
+            }
+        }
+    }
+
+    if (target != -1) {
+        if (g_PreviewCache[target].hBitmap && g_PreviewCache[target].hBitmap != hBmp) {
+            DeleteObject(g_PreviewCache[target].hBitmap);
+        }
+        g_PreviewCache[target].Handle = handle;
+        g_PreviewCache[target].hBitmap = hBmp;
+        g_PreviewCache[target].LastAccess = GetTickCount();
+    } else {
+        DeleteObject(hBmp);
+    }
+    LeaveCriticalSection(&g_PreviewCs);
+}
+
+static void ClearPreviewCache(void)
+{
+    int i;
+    EnterCriticalSection(&g_PreviewCs);
+    for (i = 0; i < PREVIEW_CACHE_MAX; i++) {
+        if (g_PreviewCache[i].hBitmap) {
+            DeleteObject(g_PreviewCache[i].hBitmap);
+            g_PreviewCache[i].hBitmap = NULL;
+        }
+        g_PreviewCache[i].Handle = 0;
+        g_PreviewCache[i].LastAccess = 0;
+    }
+    LeaveCriticalSection(&g_PreviewCs);
+}
+
+static BOOL IsImageObject(const OBJECT_ITEM *obj)
+{
+    char nameA[256];
+    const char *dot;
+    if (!obj || obj->IsFolder) return FALSE;
+    if (obj->Format == MTP_FORMAT_EXIF_JPEG || obj->Format == MTP_FORMAT_BMP) {
+        return TRUE;
+    }
+    WideCharToMultiByte(CP_ACP, 0, obj->Name, -1, nameA, sizeof(nameA), NULL, NULL);
+    dot = strrchr(nameA, '.');
+    if (dot) {
+        if (_stricmp(dot, ".jpg") == 0 || _stricmp(dot, ".jpeg") == 0 ||
+            _stricmp(dot, ".bmp") == 0 || _stricmp(dot, ".gif") == 0) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
+{
+    DWORD handle;
+    OBJECT_ITEM item;
+    BOOL found;
+    DWORD k;
+    HBITMAP hBmp;
+    DWORD params[1];
+    BYTE *thumbBuf;
+    DWORD thumbBytes;
+    BOOL bThumbOk;
+    DWORD totalSize;
+    BYTE *imgBuf;
+    DWORD transferred;
+    MTP_GET_PART_REQ req;
+    DWORD remaining;
+    DWORD chunkSize;
+    DWORD bytesRet;
+    BOOL bPartOk;
+    DWORD optChunk;
+
+    handle = (DWORD)(DWORD_PTR)lpParam;
+    found = FALSE;
+    hBmp = NULL;
+    thumbBuf = NULL;
+    thumbBytes = 0;
+    bThumbOk = FALSE;
+
+    if (handle == 0 || g_CancelPreview) return 0;
+
+    CoInitialize(NULL);
+
+    EnterCriticalSection(&g_ObjectsCs);
+    if (g_Objects) {
+        for (k = 0; k < g_ObjectCount; k++) {
+            if (g_Objects[k].Handle == handle) {
+                item = g_Objects[k];
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_ObjectsCs);
+
+    if (!found || g_CancelPreview || handle != g_CurrentPreviewHandle) {
+        CoUninitialize();
+        return 0;
+    }
+
+    /* Method 1: PTP/MTP GetThumb (0x100A) - Instant thumbnail for camera & gallery photos */
+    params[0] = handle;
+    thumbBuf = (BYTE*)malloc(131072);
+    if (thumbBuf) {
+        bThumbOk = MtpSendOperation(0x100A, params, 1, NULL, 0, thumbBuf, 131072, &thumbBytes);
+        if (bThumbOk && thumbBytes > 64) {
+            if ((thumbBuf[0] == 0xFF && thumbBuf[1] == 0xD8) ||
+                (thumbBuf[0] == 'B' && thumbBuf[1] == 'M')) {
+                hBmp = LoadImageFromMemory(thumbBuf, thumbBytes, PREVIEW_BOX_W, PREVIEW_BOX_H);
+            }
+        }
+        free(thumbBuf);
+    }
+
+    if (g_CancelPreview || handle != g_CurrentPreviewHandle) {
+        if (hBmp) DeleteObject(hBmp);
+        CoUninitialize();
+        return 0;
+    }
+
+    /* Method 2: If no embedded thumb (e.g. screenshots), download full image if <= 3 MB */
+    if (!hBmp && item.Size > 0 && item.Size <= (3000 * 1024ULL)) {
+        totalSize = (DWORD)item.Size;
+        imgBuf = (BYTE*)malloc(totalSize);
+        if (imgBuf) {
+            transferred = 0;
+            optChunk = (g_OptimalChunkSize > 0) ? g_OptimalChunkSize : 65536;
+
+            while (transferred < totalSize && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
+                remaining = totalSize - transferred;
+                chunkSize = (remaining > optChunk) ? optChunk : remaining;
+                bytesRet = 0;
+
+                req.Id = handle;
+                req.OffsetLow = transferred;
+                req.OffsetHigh = 0;
+                req.Length = chunkSize;
+
+                EnterCriticalSection(&g_DeviceCs);
+                bPartOk = DeviceIoControl(g_hDevice, IOCTL_MTP_GET_OBJECT_PART,
+                                          &req, sizeof(req), imgBuf + transferred, chunkSize, &bytesRet, NULL);
+                LeaveCriticalSection(&g_DeviceCs);
+
+                if (!bPartOk || bytesRet == 0) break;
+                transferred += bytesRet;
+            }
+
+            if (transferred == totalSize && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
+                hBmp = LoadImageFromMemory(imgBuf, totalSize, PREVIEW_BOX_W, PREVIEW_BOX_H);
+            }
+            free(imgBuf);
+        }
+    }
+
+    if (hBmp) {
+        if (!g_CancelPreview && handle == g_CurrentPreviewHandle) {
+            AddCachedPreview(handle, hBmp);
+            PostMessage(g_hMainWnd, WM_USER_PREVIEW_READY, (WPARAM)handle, 0);
+        } else {
+            DeleteObject(hBmp);
+        }
+    }
+
+    CoUninitialize();
+    return 0;
 }
 
 /* ============================================================================
@@ -2620,51 +2987,33 @@ LRESULT CALLBACK WebViewWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 DrawEdge(hdc, &rcFrame, EDGE_SUNKEN, BF_RECT);
                 
                 /* Draw preview content inside box */
-                if (selectedObj->Format == MTP_FORMAT_EXIF_JPEG || 
-                    selectedObj->Format == MTP_FORMAT_BMP || 
-                    selectedObj->Format == MTP_FORMAT_PNG) {
-                    /* Image preview: Scenic sky, sun, landscape thumbnail */
-                    HBRUSH hSkyBrush;
-                    HBRUSH hSunBrush;
-                    HBRUSH hGrassBrush;
-                    HBRUSH hMtnBrush;
-                    RECT rcSky;
-                    RECT rcGrass;
-                    POINT mtnPts[3];
+                if (IsImageObject(selectedObj)) {
+                    HBITMAP hBmp = GetCachedPreview(selectedObj->Handle);
+                    if (hBmp) {
+                        /* Real picture loaded: Blit centered image onto preview box */
+                        HDC hdcMem = CreateCompatibleDC(hdc);
+                        if (hdcMem) {
+                            HBITMAP hOldB = (HBITMAP)SelectObject(hdcMem, hBmp);
+                            BitBlt(hdc, rcFrame.left + 2, rcFrame.top + 2, PREVIEW_BOX_W, PREVIEW_BOX_H,
+                                   hdcMem, 0, 0, SRCCOPY);
+                            SelectObject(hdcMem, hOldB);
+                            DeleteDC(hdcMem);
+                        }
+                    } else {
+                        /* Image is being loaded asynchronously or not yet cached: clean placeholder with icon */
+                        RECT rcInner;
+                        int iconIndex;
+                        rcInner.left = rcFrame.left + 2;
+                        rcInner.top = rcFrame.top + 2;
+                        rcInner.right = rcFrame.right - 2;
+                        rcInner.bottom = rcFrame.bottom - 2;
+                        FillRect(hdc, &rcInner, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
-                    hSkyBrush = CreateSolidBrush(RGB(110, 180, 245));
-                    hSunBrush = CreateSolidBrush(RGB(255, 220, 60));
-                    hGrassBrush = CreateSolidBrush(RGB(65, 160, 65));
-                    hMtnBrush = CreateSolidBrush(RGB(120, 140, 160));
-
-                    rcSky.left = rcFrame.left + 2;
-                    rcSky.top = rcFrame.top + 2;
-                    rcSky.right = rcFrame.right - 2;
-                    rcSky.bottom = rcFrame.bottom - 30;
-
-                    rcGrass.left = rcFrame.left + 2;
-                    rcGrass.top = rcFrame.bottom - 30;
-                    rcGrass.right = rcFrame.right - 2;
-                    rcGrass.bottom = rcFrame.bottom - 2;
-                    
-                    FillRect(hdc, &rcSky, hSkyBrush);
-                    SelectObject(hdc, GetStockObject(NULL_PEN));
-                    SelectObject(hdc, hSunBrush);
-                    Ellipse(hdc, rcFrame.left + 85, rcFrame.top + 8, rcFrame.left + 105, rcFrame.top + 28);
-                    
-                    /* Mountain */
-                    mtnPts[0].x = rcFrame.left + 20; mtnPts[0].y = rcFrame.bottom - 30;
-                    mtnPts[1].x = rcFrame.left + 50; mtnPts[1].y = rcFrame.top + 30;
-                    mtnPts[2].x = rcFrame.left + 80; mtnPts[2].y = rcFrame.bottom - 30;
-                    SelectObject(hdc, hMtnBrush);
-                    Polygon(hdc, mtnPts, 3);
-                    
-                    FillRect(hdc, &rcGrass, hGrassBrush);
-                    
-                    DeleteObject(hSkyBrush);
-                    DeleteObject(hSunBrush);
-                    DeleteObject(hGrassBrush);
-                    DeleteObject(hMtnBrush);
+                        iconIndex = GetIconIndexForFormat(selectedObj->Format, FALSE);
+                        if (g_hLargeImageList) {
+                            ImageList_Draw(g_hLargeImageList, iconIndex, hdc, rcFrame.left + 49, rcFrame.top + 31, ILD_TRANSPARENT);
+                        }
+                    }
                 } else if (selectedObj->IsFolder) {
                     /* Folder graphic */
                     if (g_hLargeImageList) {
@@ -4730,6 +5079,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 RemoveTaskbarNotification(hWnd);
                 return 0;
             }
+            if (wParam == TIMER_PREVIEW_DEBOUNCE) {
+                KillTimer(hWnd, TIMER_PREVIEW_DEBOUNCE);
+                if (g_Connected && g_hDevice != INVALID_HANDLE_VALUE &&
+                    !g_bSearchRunning && !g_IsEnumerating && !g_bTransferRunning) {
+                    DWORD handle = g_CurrentPreviewHandle;
+                    if (handle != 0 && !GetCachedPreview(handle)) {
+                        /* Cancel any existing preview thread */
+                        InterlockedExchange(&g_CancelPreview, 1);
+                        if (g_hPreviewThread) {
+                            WaitForSingleObject(g_hPreviewThread, 100);
+                            CloseHandle(g_hPreviewThread);
+                            g_hPreviewThread = NULL;
+                        }
+                        InterlockedExchange(&g_CancelPreview, 0);
+                        g_hPreviewThread = CreateThread(NULL, 0, PreviewWorkerThread, (LPVOID)(DWORD_PTR)handle, 0, NULL);
+                    }
+                }
+                return 0;
+            }
             if (wParam == TIMER_DEVICE_CHECK) {
                 if (g_bSearchRunning || g_IsEnumerating) return 0;
                 if (g_Connected && g_hDevice != INVALID_HANDLE_VALUE) {
@@ -4752,6 +5120,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
             break;
+            
+        case WM_USER_PREVIEW_READY: {
+            DWORD handle = (DWORD)wParam;
+            if (handle == g_CurrentPreviewHandle && g_hWebView) {
+                InvalidateRect(g_hWebView, NULL, TRUE);
+            }
+            return 0;
+        }
             
         case WM_TRAY_NOTIFY:
             if (lParam == WM_LBUTTONDOWN || lParam == WM_RBUTTONDOWN) {
@@ -5365,9 +5741,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         }
                     }
                 } else if (pnmh->code == LVN_ITEMCHANGED) {
-                    /* Selection changed: Trigger Web View repaint to update preview and metadata */
-                    if (g_hWebView) {
-                        InvalidateRect(g_hWebView, NULL, TRUE);
+                    LPNMLISTVIEW pnmlv = (LPNMLISTVIEW)lParam;
+                    if ((pnmlv->uChanged & LVIF_STATE) &&
+                        ((pnmlv->uNewState & LVIS_SELECTED) != (pnmlv->uOldState & LVIS_SELECTED))) {
+                        int selIdx;
+                        DWORD handle;
+                        BOOL isImg;
+
+                        selIdx = ListView_GetNextItem(g_hListView, -1, LVNI_SELECTED);
+                        handle = 0;
+                        isImg = FALSE;
+
+                        if (selIdx != -1) {
+                            EnterCriticalSection(&g_ObjectsCs);
+                            if (g_Objects && (DWORD)selIdx < g_ObjectCount) {
+                                handle = g_Objects[selIdx].Handle;
+                                isImg = IsImageObject(&g_Objects[selIdx]);
+                            }
+                            LeaveCriticalSection(&g_ObjectsCs);
+                        }
+
+                        /* Cancel any pending preview worker */
+                        InterlockedExchange(&g_CancelPreview, 1);
+                        KillTimer(hWnd, TIMER_PREVIEW_DEBOUNCE);
+
+                        if (handle != 0 && isImg) {
+                            g_CurrentPreviewHandle = handle;
+                            if (GetCachedPreview(handle)) {
+                                /* Already cached! Repaint immediately */
+                                if (g_hWebView) InvalidateRect(g_hWebView, NULL, TRUE);
+                            } else {
+                                /* Debounce 100ms so rapid scrolling/arrow-key navigation doesn't spam threads */
+                                SetTimer(hWnd, TIMER_PREVIEW_DEBOUNCE, 100, NULL);
+                                if (g_hWebView) InvalidateRect(g_hWebView, NULL, TRUE);
+                            }
+                        } else {
+                            g_CurrentPreviewHandle = 0;
+                            if (g_hWebView) InvalidateRect(g_hWebView, NULL, TRUE);
+                        }
                     }
                 }
             }
@@ -5375,6 +5786,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         
         case WM_DESTROY:
+            InterlockedExchange(&g_CancelPreview, 1);
+            KillTimer(hWnd, TIMER_PREVIEW_DEBOUNCE);
+            if (g_hPreviewThread) {
+                WaitForSingleObject(g_hPreviewThread, 300);
+                CloseHandle(g_hPreviewThread);
+                g_hPreviewThread = NULL;
+            }
+            ClearPreviewCache();
             KillTimer(hWnd, TIMER_DEVICE_CHECK);
             RemoveTaskbarNotification(hWnd);
             if (!g_Connected) {
@@ -5498,8 +5917,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     bEnableDebug = (lpCmdLine && (strstr(lpCmdLine, "/debug") || strstr(lpCmdLine, "-debug") || strstr(lpCmdLine, "/console")));
     InitDebugConsole(bEnableDebug);
 
+    OleInitialize(NULL);
+
     InitializeCriticalSection(&g_ObjectsCs);
     InitializeCriticalSection(&g_DeviceCs);
+    InitializeCriticalSection(&g_PreviewCs);
 
     g_hInstance = hInstance;
     
@@ -5656,6 +6078,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     DeleteCriticalSection(&g_ObjectsCs);
     DeleteCriticalSection(&g_DeviceCs);
+    DeleteCriticalSection(&g_PreviewCs);
+
+    OleUninitialize();
 
     return (int)msg.wParam;
 }
