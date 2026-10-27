@@ -340,6 +340,7 @@ void SetViewMode(int viewMode);
 BOOL ConnectDevice(void);
 BOOL ConnectDeviceEx(BOOL showErrors);
 void DisconnectDevice(void);
+void RegisterPortableDeviceCLSID(void);
 void UnregisterPortableDeviceCLSID(void);
 BOOL RefreshObjects(void);
 BOOL DownloadSelected(HWND hWnd);
@@ -897,6 +898,9 @@ BOOL ConnectDeviceEx(BOOL showErrors)
     g_SessionId = *((DWORD*)buffer);
     g_Connected = TRUE;
     
+    /* Auto-register self in Windows 2000 My Computer NameSpace so icon appears immediately */
+    RegisterPortableDeviceCLSID();
+
     _snprintf(statusText, sizeof(statusText), "Connected - Session 0x%08X", g_SessionId);
     SetStatus(statusText);
     
@@ -1008,10 +1012,20 @@ BOOL ConnectDeviceEx(BOOL showErrors)
                         "Device: %s\n%s\n%s\nFile System: MTP (Media Transfer Protocol)\nStatus: Connected and ready for transfers",
                         g_szRootName, g_szCapacityStr, g_szFreeSpaceStr);
                     _snprintf(comment, sizeof(comment), "%s (%s)", g_szCapacityStr, g_szFreeSpaceStr);
-                    RegSetValueExA(hKey, "InfoTip", 0, REG_SZ, (BYTE*)infoTip, (DWORD)strlen(infoTip) + 1);
-                    RegSetValueExA(hKey, "Comments", 0, REG_SZ, (BYTE*)comment, (DWORD)strlen(comment) + 1);
+                    RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)g_szRootName, (DWORD)strlen(g_szRootName) + 1);
+                    RegSetValueExA(hKey, "InfoTip", 0, REG_SZ, (const BYTE*)infoTip, (DWORD)strlen(infoTip) + 1);
+                    RegSetValueExA(hKey, "Comments", 0, REG_SZ, (const BYTE*)comment, (DWORD)strlen(comment) + 1);
+                    RegSetValueExA(hKey, "LocalizedString", 0, REG_SZ, (const BYTE*)g_szRootName, (DWORD)strlen(g_szRootName) + 1);
                     RegCloseKey(hKey);
                 }
+                if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\{E0C30E66-2679-4594-817D-38F75FEF30A1}",
+                    0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+                    RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)g_szRootName, (DWORD)strlen(g_szRootName) + 1);
+                    RegCloseKey(hKey);
+                }
+                SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSHNOWAIT, "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", NULL);
+                SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
             }
         }
     }
@@ -1051,24 +1065,15 @@ void HandleDeviceRemoval(HWND hWnd)
         g_hEnumThread = NULL;
     }
 
-    /* 2. Kill device check timer */
-    KillTimer(hWnd, TIMER_DEVICE_CHECK);
-
-    /* 3. Disconnect device */
+    /* 2. Disconnect device (removes icon from My Computer) */
     DisconnectDevice();
 
-    /* 4. Show notification balloon */
+    /* 3. Show notification balloon */
     {
         char msg[256];
         _snprintf(msg, sizeof(msg), "%s was removed from the computer. Reconnect the cable to continue.", devName);
         ShowTaskbarNotification(hWnd, "Device Removed", msg, NIIF_WARNING);
     }
-
-    /* 5. Navigate to My Computer */
-    ShellExecuteA(NULL, "open", "explorer.exe", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", NULL, SW_SHOWNORMAL);
-
-    /* 6. Close GUI cleanly */
-    PostMessage(hWnd, WM_CLOSE, 0, 0);
 }
 
 void DisconnectDevice(void)
@@ -4672,8 +4677,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     HandleDeviceRemoval(hWnd);
                     return TRUE;
                 }
-            } else if (wParam == 0x0007 /* DBT_DEVNODES_CHANGED */) {
-                if (g_Connected && g_hDevice != INVALID_HANDLE_VALUE) {
+            } else if (wParam == 0x8000 /* DBT_DEVICEARRIVAL */ || wParam == 0x0007 /* DBT_DEVNODES_CHANGED */) {
+                if (!g_Connected) {
+                    ConnectDeviceEx(FALSE);
+                    return TRUE;
+                } else if (g_hDevice != INVALID_HANDLE_VALUE) {
                     MTP_SPEED_INFO speedInfo;
                     DWORD ret = 0;
                     if (!DeviceIoControl(g_hDevice, IOCTL_MTP_GET_TRANSFER_SPEED, NULL, 0,
@@ -4731,6 +4739,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                          &speedInfo, sizeof(speedInfo), &ret, NULL)) {
                         HandleDeviceRemoval(hWnd);
                         return 0;
+                    }
+                } else if (!g_Connected) {
+                    /* Probe if device became available (e.g. cable connected) */
+                    HANDLE hProbe = CreateFileA(DEVICE_NAME, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                    if (hProbe != INVALID_HANDLE_VALUE) {
+                        CloseHandle(hProbe);
+                        ConnectDeviceEx(FALSE);
                     }
                 }
                 return 0;
@@ -5361,9 +5377,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_DESTROY:
             KillTimer(hWnd, TIMER_DEVICE_CHECK);
             RemoveTaskbarNotification(hWnd);
-            DisconnectDevice();
-            /* Ensure My Computer icon is removed on app exit */
-            UnregisterPortableDeviceCLSID();
+            if (!g_Connected) {
+                /* If device was disconnected, ensure My Computer icon is cleaned up */
+                UnregisterPortableDeviceCLSID();
+            }
             if (g_hLargeImageList) ImageList_Destroy(g_hLargeImageList);
             if (g_hSmallImageList) ImageList_Destroy(g_hSmallImageList);
             PostQuitMessage(0);
@@ -5380,24 +5397,24 @@ void RegisterPortableDeviceCLSID(void)
 {
     char szExePath[MAX_PATH];
     char szCmd[MAX_PATH + 8];
+    char szSysDir[MAX_PATH];
+    char szIcon[MAX_PATH + 16];
     HKEY hKey;
 
     if (GetModuleFileNameA(NULL, szExePath, sizeof(szExePath)) == 0) return;
     _snprintf(szCmd, sizeof(szCmd), "\"%s\"", szExePath);
 
-    /* 1. Register CLSID Shell\Open\Command in HKCR so My Computer always launches this EXE */
-    if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
-        "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell\\Open\\Command",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szCmd, (DWORD)strlen(szCmd) + 1);
-        RegCloseKey(hKey);
+    if (GetSystemDirectoryA(szSysDir, sizeof(szSysDir)) > 0) {
+        _snprintf(szIcon, sizeof(szIcon), "%s\\sticpl.cpl,1", szSysDir);
+    } else {
+        _snprintf(szIcon, sizeof(szIcon), "%s,0", szExePath);
     }
 
-    /* 2. Set default name and metadata in CLSID */
+    /* 1. Base CLSID */
     if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
         "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        const char *szName = "Portable Device (Android Smartphone)";
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        const char *szName = g_szRootName[0] ? g_szRootName : "Portable Device (Android Smartphone)";
         const char *szInfo = "Device: Portable Android Device\nStorage: Dynamically detected from connected phone\nFile System: MTP (Media Transfer Protocol)\nStatus: Ready for connection";
         RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szName, (DWORD)strlen(szName) + 1);
         RegSetValueExA(hKey, "InfoTip", 0, REG_SZ, (const BYTE*)szInfo, (DWORD)strlen(szInfo) + 1);
@@ -5405,53 +5422,70 @@ void RegisterPortableDeviceCLSID(void)
         RegCloseKey(hKey);
     }
 
-    /* 3. Set DefaultIcon: Windows 2000 Digital Camera icon (0 bytes overhead) */
+    /* 2. DefaultIcon (Windows 2000 Digital Camera icon) */
     if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
         "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\DefaultIcon",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        const char *szIcon = "%SystemRoot%\\System32\\sticpl.cpl,1";
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szIcon, (DWORD)strlen(szIcon) + 1);
         RegCloseKey(hKey);
     }
 
-    /* 4. Set ShellFolder Attributes */
+    /* 3. ShellFolder */
     if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
         "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\ShellFolder",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         DWORD dwAttr = 0;
         RegSetValueExA(hKey, "Attributes", 0, REG_BINARY, (const BYTE*)&dwAttr, sizeof(DWORD));
         RegCloseKey(hKey);
     }
 
-    /* 5. Register in MyComputer\NameSpace in HKLM */
+    /* 4. Shell default verb */
+    if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
+        "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)"Open", 5);
+        RegCloseKey(hKey);
+    }
+
+    /* 5. Shell\\Open */
+    if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
+        "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell\\Open",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)"&Open", 6);
+        RegCloseKey(hKey);
+    }
+
+    /* 6. Shell\\Open\\Command */
+    if (RegCreateKeyExA(HKEY_CLASSES_ROOT,
+        "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell\\Open\\Command",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szCmd, (DWORD)strlen(szCmd) + 1);
+        RegCloseKey(hKey);
+    }
+
+    /* 7. Register in MyComputer\\NameSpace in HKLM */
     if (RegCreateKeyExA(HKEY_LOCAL_MACHINE,
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\{E0C30E66-2679-4594-817D-38F75FEF30A1}",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        const char *szName = "Portable Device (Android Smartphone)";
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        const char *szName = g_szRootName[0] ? g_szRootName : "Portable Device (Android Smartphone)";
         RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szName, (DWORD)strlen(szName) + 1);
         RegCloseKey(hKey);
     }
 
-    /* 6. Notify Explorer shell to refresh My Computer so icon appears immediately */
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+    /* 8. Notify Explorer shell to refresh My Computer so icon appears immediately */
+    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSHNOWAIT, "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", NULL);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
 }
 
 void UnregisterPortableDeviceCLSID(void)
 {
-    /* 1. Remove from MyComputer\NameSpace so icon disappears from My Computer */
+    /* 1. Remove from MyComputer\\NameSpace so icon disappears from My Computer */
     RegDeleteKeyA(HKEY_LOCAL_MACHINE,
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\{E0C30E66-2679-4594-817D-38F75FEF30A1}");
 
-    /* 2. Clean up CLSID sub-keys (must delete children before parent on Win2K) */
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell\\Open\\Command");
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell\\Open");
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\Shell");
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\DefaultIcon");
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}\\ShellFolder");
-    RegDeleteKeyA(HKEY_CLASSES_ROOT, "CLSID\\{E0C30E66-2679-4594-817D-38F75FEF30A1}");
-
-    /* 3. Notify Explorer shell to refresh My Computer so icon disappears immediately */
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+    /* 2. Notify Explorer shell to refresh My Computer so icon disappears immediately */
+    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSHNOWAIT, "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", NULL);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
 }
 
 /* ============================================================================
