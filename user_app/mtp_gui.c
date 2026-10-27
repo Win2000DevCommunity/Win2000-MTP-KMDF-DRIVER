@@ -67,10 +67,12 @@
 #define IDM_VIEW_TOOLBAR_STD   225
 #define IDM_VIEW_TOOLBAR_ADDR  226
 #define IDM_VIEW_STATUSBAR     227
-#define IDM_VIEW_SORT_NAME     228
-#define IDM_VIEW_SORT_SIZE     229
-#define IDM_VIEW_SORT_TYPE     236
-#define IDM_VIEW_SORT_DATE     237
+#define IDM_VIEW_SORT_NAME        260
+#define IDM_VIEW_SORT_SIZE        261
+#define IDM_VIEW_SORT_TYPE        262
+#define IDM_VIEW_SORT_DATE        263
+#define IDM_VIEW_SORT_ASCENDING   264
+#define IDM_VIEW_SORT_DESCENDING  265
 
 
 #define IDM_TOOLS_OPTIONS      230
@@ -519,91 +521,46 @@ void UpdateColumnHeaders(void)
 {
     HWND hHeader;
     int i;
-    static const WCHAR *baseNames[4] = { L"Name", L"Size", L"Type", L"Date Modified" };
+    static const char *baseNames[4] = { "Name", "Size", "Type", "Date Modified" };
 
     if (!g_hListView) return;
     hHeader = ListView_GetHeader(g_hListView);
     if (!hHeader) return;
 
     for (i = 0; i < 4; i++) {
-        HDITEMW hdi;
-        WCHAR wszText[64];
+        HDITEMA hdi;
         ZeroMemory(&hdi, sizeof(hdi));
         hdi.mask = HDI_TEXT;
-        hdi.pszText = wszText;
-        hdi.cchTextMax = sizeof(wszText) / sizeof(WCHAR);
-
-        if (i == g_SortColumn) {
-            wsprintfW(wszText, L"%s %s", baseNames[i], g_SortAscending ? L"\x25B2" : L"\x25BC");
-        } else {
-            wcsncpy(wszText, baseNames[i], (sizeof(wszText) / sizeof(WCHAR)) - 1);
-            wszText[(sizeof(wszText) / sizeof(WCHAR)) - 1] = L'\0';
-        }
-        SendMessageW(hHeader, HDM_SETITEMW, (WPARAM)i, (LPARAM)&hdi);
+        hdi.pszText = (char*)baseNames[i];
+        SendMessageA(hHeader, HDM_SETITEMA, (WPARAM)i, (LPARAM)&hdi);
     }
 }
 
 void PopulateArrangeMenu(HMENU hArrangeMenu)
 {
-    static const struct {
-        UINT id;
-        const WCHAR *baseLabel;
-        int colIndex;
-    } sortItems[4] = {
-        { IDM_VIEW_SORT_NAME, L"by &Name", 0 },
-        { IDM_VIEW_SORT_SIZE, L"by &Size", 1 },
-        { IDM_VIEW_SORT_TYPE, L"by &Type", 2 },
-        { IDM_VIEW_SORT_DATE, L"by &Date", 3 }
-    };
-    int i;
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_NAME, "by &Name");
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_SIZE, "by &Size");
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_TYPE, "by &Type");
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_DATE, "by &Date");
+    AppendMenuA(hArrangeMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_ASCENDING, "&Ascending");
+    AppendMenuA(hArrangeMenu, MF_STRING, IDM_VIEW_SORT_DESCENDING, "&Descending");
 
-    for (i = 0; i < 4; i++) {
-        WCHAR wszLabel[64];
-        UINT flags = MF_STRING;
-
-        if (sortItems[i].colIndex == g_SortColumn) {
-            flags |= MF_CHECKED;
-            wsprintfW(wszLabel, L"%s %s", sortItems[i].baseLabel, g_SortAscending ? L"\x25B2" : L"\x25BC");
-        } else {
-            flags |= MF_UNCHECKED;
-            wcsncpy(wszLabel, sortItems[i].baseLabel, (sizeof(wszLabel) / sizeof(WCHAR)) - 1);
-            wszLabel[(sizeof(wszLabel) / sizeof(WCHAR)) - 1] = L'\0';
-        }
-        AppendMenuW(hArrangeMenu, flags, sortItems[i].id, wszLabel);
-    }
+    CheckMenuRadioItem(hArrangeMenu, IDM_VIEW_SORT_NAME, IDM_VIEW_SORT_DATE,
+                       IDM_VIEW_SORT_NAME + g_SortColumn, MF_BYCOMMAND);
+    CheckMenuRadioItem(hArrangeMenu, IDM_VIEW_SORT_ASCENDING, IDM_VIEW_SORT_DESCENDING,
+                       g_SortAscending ? IDM_VIEW_SORT_ASCENDING : IDM_VIEW_SORT_DESCENDING, MF_BYCOMMAND);
 }
 
 void UpdateSortMenu(HWND hWnd)
 {
     HMENU hMenu = GetMenu(hWnd);
-    static const struct {
-        UINT id;
-        const WCHAR *baseLabel;
-        int colIndex;
-    } sortItems[4] = {
-        { IDM_VIEW_SORT_NAME, L"by &Name", 0 },
-        { IDM_VIEW_SORT_SIZE, L"by &Size", 1 },
-        { IDM_VIEW_SORT_TYPE, L"by &Type", 2 },
-        { IDM_VIEW_SORT_DATE, L"by &Date", 3 }
-    };
-    int i;
-
     if (!hMenu) return;
 
-    for (i = 0; i < 4; i++) {
-        WCHAR wszLabel[64];
-        UINT flags = MF_BYCOMMAND | MF_STRING;
-
-        if (sortItems[i].colIndex == g_SortColumn) {
-            flags |= MF_CHECKED;
-            wsprintfW(wszLabel, L"%s %s", sortItems[i].baseLabel, g_SortAscending ? L"\x25B2" : L"\x25BC");
-        } else {
-            flags |= MF_UNCHECKED;
-            wcsncpy(wszLabel, sortItems[i].baseLabel, (sizeof(wszLabel) / sizeof(WCHAR)) - 1);
-            wszLabel[(sizeof(wszLabel) / sizeof(WCHAR)) - 1] = L'\0';
-        }
-        ModifyMenuW(hMenu, sortItems[i].id, flags, sortItems[i].id, wszLabel);
-    }
+    CheckMenuRadioItem(hMenu, IDM_VIEW_SORT_NAME, IDM_VIEW_SORT_DATE,
+                       IDM_VIEW_SORT_NAME + g_SortColumn, MF_BYCOMMAND);
+    CheckMenuRadioItem(hMenu, IDM_VIEW_SORT_ASCENDING, IDM_VIEW_SORT_DESCENDING,
+                       g_SortAscending ? IDM_VIEW_SORT_ASCENDING : IDM_VIEW_SORT_DESCENDING, MF_BYCOMMAND);
 }
 
 void SortObjectList(int column, BOOL toggle)
@@ -613,7 +570,6 @@ void SortObjectList(int column, BOOL toggle)
         g_SortAscending = !g_SortAscending;
     } else if (g_SortColumn != column) {
         g_SortColumn = column;
-        g_SortAscending = TRUE;
     }
 
     EnterCriticalSection(&g_ObjectsCs);
@@ -627,19 +583,16 @@ void SortObjectList(int column, BOOL toggle)
         UpdateWindow(g_hListView);
     }
 
-    /* Update column headers with sort direction arrows (Details view) */
-    UpdateColumnHeaders();
-
-    /* Update main menu sort checkmarks and arrows */
+    /* Update main menu sort radio checkmarks */
     if (g_hMainWnd) {
         UpdateSortMenu(g_hMainWnd);
     }
 
     if (g_bDebugConsole) {
         colName = "Name";
-        if (column == 1) colName = "Size";
-        else if (column == 2) colName = "Type";
-        else if (column == 3) colName = "Date";
+        if (g_SortColumn == 1) colName = "Size";
+        else if (g_SortColumn == 2) colName = "Type";
+        else if (g_SortColumn == 3) colName = "Date";
         DebugLog("Sorted %lu items by %s (%s)", g_ObjectCount, colName, g_SortAscending ? "Ascending" : "Descending");
     }
 }
@@ -4705,7 +4658,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_INITMENUPOPUP: {
             HMENU hMenuPopup = (HMENU)wParam;
             if (GetMenuState(hMenuPopup, IDM_VIEW_SORT_NAME, MF_BYCOMMAND) != 0xFFFFFFFF) {
-                UpdateSortMenu(hWnd);
+                CheckMenuRadioItem(hMenuPopup, IDM_VIEW_SORT_NAME, IDM_VIEW_SORT_DATE,
+                                   IDM_VIEW_SORT_NAME + g_SortColumn, MF_BYCOMMAND);
+                CheckMenuRadioItem(hMenuPopup, IDM_VIEW_SORT_ASCENDING, IDM_VIEW_SORT_DESCENDING,
+                                   g_SortAscending ? IDM_VIEW_SORT_ASCENDING : IDM_VIEW_SORT_DESCENDING, MF_BYCOMMAND);
             }
             break;
         }
@@ -5000,19 +4956,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     break;
                     
                 case IDM_VIEW_SORT_NAME:
-                    SortObjectList(0, TRUE);
+                    SortObjectList(0, FALSE);
                     break;
 
                 case IDM_VIEW_SORT_SIZE:
-                    SortObjectList(1, TRUE);
+                    SortObjectList(1, FALSE);
                     break;
 
                 case IDM_VIEW_SORT_TYPE:
-                    SortObjectList(2, TRUE);
+                    SortObjectList(2, FALSE);
                     break;
 
                 case IDM_VIEW_SORT_DATE:
-                    SortObjectList(3, TRUE);
+                    SortObjectList(3, FALSE);
+                    break;
+
+                case IDM_VIEW_SORT_ASCENDING:
+                    g_SortAscending = TRUE;
+                    SortObjectList(g_SortColumn, FALSE);
+                    break;
+
+                case IDM_VIEW_SORT_DESCENDING:
+                    g_SortAscending = FALSE;
+                    SortObjectList(g_SortColumn, FALSE);
                     break;
                     
                 case IDM_VIEW_TOOLBAR_STD:
