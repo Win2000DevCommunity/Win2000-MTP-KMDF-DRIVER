@@ -14,9 +14,9 @@ Windows Registry Editor Version 5.00
 "Comments"="Storage: Dynamic (Auto-detected per device)"
 "LocalizedString"="Portable Device (Android Smartphone)"
 
-; Use Windows 2000 digital media / camera / portable device shell icon (shell32.dll index 17)
+; Use Windows 2000 Digital Camera shell icon (sticpl.cpl index 1)
 [HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\DefaultIcon]
-@="%SystemRoot%\\System32\\shell32.dll,17"
+@="%SystemRoot%\\System32\\sticpl.cpl,1"
 
 ; Shell Folder Attributes
 [HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}\ShellFolder]

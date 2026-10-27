@@ -32,6 +32,7 @@ if (Test-Path $hostPhoneStorage) {
 
 # Standalone tools
 Copy-Item "$workspaceRoot\user_app\mtp_gui.exe" "$qemuStaging\"
+Copy-Item "$workspaceRoot\user_app\mtp_gui_debug.exe" "$qemuStaging\"
 Copy-Item "$workspaceRoot\test_app\mtp_test.exe" "$qemuStaging\"
 Copy-Item "$workspaceRoot\Release\MTP_DRIVE.REG" "$qemuStaging\"
 Copy-Item "$workspaceRoot\Release\DISABLE_SIGNING.REG" "$qemuStaging\"
@@ -129,10 +130,12 @@ Copy-Item "$workspaceRoot\Release\DISABLE_SIGNING.REG" "$metalStaging\"
 
 # Applications
 Copy-Item "$workspaceRoot\user_app\mtp_gui.exe" "$metalStaging\"
+Copy-Item "$workspaceRoot\user_app\mtp_gui_debug.exe" "$metalStaging\"
 Copy-Item "$workspaceRoot\test_app\mtp_test.exe" "$metalStaging\"
 Copy-Item "$workspaceRoot\user_app\mtp_transfer.exe" "$metalStaging\"
 
 Copy-Item "$workspaceRoot\user_app\mtp_gui.exe" "$metalStaging\Applications\"
+Copy-Item "$workspaceRoot\user_app\mtp_gui_debug.exe" "$metalStaging\Applications\"
 Copy-Item "$workspaceRoot\test_app\mtp_test.exe" "$metalStaging\Applications\"
 Copy-Item "$workspaceRoot\user_app\mtp_transfer.exe" "$metalStaging\Applications\"
 

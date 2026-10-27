@@ -14,7 +14,7 @@ set CONSOLE_LIBS=kernel32.lib user32.lib advapi32.lib BufferOverflowU.lib
 cd /d "%~dp0"
 
 echo ====================================================================
-echo   Building mtp_gui.exe (Windows 2000 Explorer GUI)
+echo   Building mtp_gui.exe (Windows 2000 Explorer GUI - Release)
 echo ====================================================================
 cl %CFLAGS% /MD mtp_gui.c /link /subsystem:windows %GUI_LIBS% /out:mtp_gui.exe
 if %ERRORLEVEL% NEQ 0 (
@@ -22,6 +22,17 @@ if %ERRORLEVEL% NEQ 0 (
     goto :error
 )
 echo [SUCCESS] mtp_gui.exe built successfully!
+
+echo.
+echo ====================================================================
+echo   Building mtp_gui_debug.exe (Diagnostics GUI with Live Console)
+echo ====================================================================
+cl %CFLAGS% /DMTP_DEBUG_CONSOLE=1 /MD mtp_gui.c /link /subsystem:windows %GUI_LIBS% /out:mtp_gui_debug.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] mtp_gui_debug.exe build failed!
+    goto :error
+)
+echo [SUCCESS] mtp_gui_debug.exe built successfully!
 
 echo.
 echo ====================================================================
@@ -40,11 +51,12 @@ echo   Copying binaries to Release folder
 echo ====================================================================
 if not exist "..\Release" mkdir "..\Release"
 copy /y mtp_gui.exe "..\Release\mtp_gui.exe"
+copy /y mtp_gui_debug.exe "..\Release\mtp_gui_debug.exe"
 copy /y mtp_transfer.exe "..\Release\mtp_transfer.exe"
 
 echo.
 echo [ALL BUILDS SUCCESSFUL]
-dir mtp_gui.exe mtp_transfer.exe
+dir mtp_gui.exe mtp_gui_debug.exe mtp_transfer.exe
 goto :end
 
 :error

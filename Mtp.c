@@ -27,6 +27,160 @@ static LIST_ENTRY gObjectList;
 static WDFSPINLOCK gObjectLock;
 static ULONG gNextObjectId = 1;
 
+PVOID MtpBuildOperationContainer(IN USHORT Opcode, IN ULONG *Params, IN ULONG ParamCount, OUT PULONG OutLen, OUT PULONG OutTid);
+
+/* When TRUE, a real USB MTP/PTP device is connected and responding.
+ * In this mode, we bypass the in-memory fake catalog for data operations
+ * (GetObjectPart, GetObject, GetObjectInfo, GetObjectHandles) and relay
+ * everything to the real device.  This prevents handle collisions where
+ * real device handles (which start at 1) match fake catalog IDs.          */
+static BOOLEAN g_bRealDevicePresent = FALSE;
+
+/* Active download streaming context */
+static ULONG     g_ActiveDownloadId = 0;
+static ULONGLONG g_ActiveDownloadOffset = 0;
+static ULONGLONG g_ActiveDownloadTotal = 0;
+static ULONGLONG g_ActiveDownloadRemaining = 0;
+static PUCHAR    g_ActiveDownloadBuf = NULL;
+static ULONG     g_ActiveDownloadBufLen = 0;
+static ULONG     g_ActiveDownloadBufPos = 0;
+
+/* Active upload streaming context */
+static ULONG     g_ActiveUploadId = 0;
+static ULONGLONG g_ActiveUploadOffset = 0;
+static ULONGLONG g_ActiveUploadTotal = 0;
+static ULONG     g_ActiveUploadTid = 0;
+
+/*
+ * Upload data-phase alignment carry buffer.
+ *
+ * The MTP responder (and QEMU's usb-mtp in particular) detects the end of the
+ * SendObject data phase from the first short USB packet (a transfer whose last
+ * packet is not a full max-packet). Because the GUI streams the object in
+ * several IOCTL chunks and the data phase is prefixed by a 12-byte container
+ * header, a naive "one WriteBulk per chunk" would emit a short packet after the
+ * very first chunk and the responder would terminate the transfer early.
+ *
+ * To avoid that we only ever hand the pipe max-packet-aligned writes until the
+ * final bytes of the object, holding any sub-packet remainder here between
+ * calls. The final flush emits the trailing short packet (or an explicit ZLP
+ * when the grand total is an exact multiple of the max-packet size).
+ */
+#define MTP_MAX_PKT_CAP 1024
+static UCHAR     g_UploadCarry[MTP_MAX_PKT_CAP];
+static ULONG     g_UploadCarryLen = 0;
+static ULONG     g_UploadMaxPkt = 64;
+
+VOID
+MtpResetStreaming(VOID)
+{
+    if (g_ActiveDownloadBuf) {
+        ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+        g_ActiveDownloadBuf = NULL;
+    }
+    g_ActiveDownloadId = 0;
+    g_ActiveDownloadOffset = 0;
+    g_ActiveDownloadTotal = 0;
+    g_ActiveDownloadRemaining = 0;
+    g_ActiveDownloadBufLen = 0;
+    g_ActiveDownloadBufPos = 0;
+
+    g_ActiveUploadId = 0;
+    g_ActiveUploadOffset = 0;
+    g_ActiveUploadTotal = 0;
+    g_ActiveUploadTid = 0;
+
+    g_UploadCarryLen = 0;
+    g_UploadMaxPkt = 64;
+}
+
+/*
+ * Append a blob to the SendObject data-phase stream, emitting only
+ * max-packet-aligned bulk writes until Final. On the final call the remaining
+ * bytes are flushed (producing the terminating short packet) and, if the total
+ * stream length is an exact multiple of the max-packet size, a ZLP is sent.
+ *
+ * Buffered state (g_UploadCarry/g_UploadCarryLen) persists across the multiple
+ * SEND_OBJECT_PART IOCTLs that make up one object.
+ */
+static NTSTATUS
+MtpUploadStreamWrite(
+    IN WDFDEVICE Device,
+    IN WDFUSBPIPE OutPipe,
+    IN PVOID Blob,
+    IN ULONG BlobLen,
+    IN BOOLEAN Final,
+    IN ULONGLONG TotalStreamLen
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG maxPkt = g_UploadMaxPkt;
+    ULONG combined;
+    PUCHAR buf;
+
+    if (maxPkt == 0 || maxPkt > MTP_MAX_PKT_CAP) maxPkt = 64;
+
+    combined = g_UploadCarryLen + BlobLen;
+
+    if (!Final) {
+        ULONG flushLen = (combined / maxPkt) * maxPkt; /* aligned portion */
+        ULONG keep = combined - flushLen;              /* remainder (< maxPkt) */
+
+        if (flushLen > 0) {
+            buf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, flushLen, 'umtp');
+            if (!buf) return STATUS_INSUFFICIENT_RESOURCES;
+            if (g_UploadCarryLen) {
+                ULONG fromCarry = (g_UploadCarryLen < flushLen) ? g_UploadCarryLen : flushLen;
+                RtlCopyMemory(buf, g_UploadCarry, fromCarry);
+            }
+            if (flushLen > g_UploadCarryLen) {
+                RtlCopyMemory(buf + g_UploadCarryLen, Blob, flushLen - g_UploadCarryLen);
+            }
+            status = MtpUsb_WriteBulk(Device, OutPipe, buf, flushLen);
+            ExFreePoolWithTag(buf, 'umtp');
+            if (!NT_SUCCESS(status)) return status;
+        }
+
+        /* Stash the trailing `keep` bytes (last bytes of carry ++ blob).
+         * keep < maxPkt <= MTP_MAX_PKT_CAP, so this fits in `tail` regardless
+         * of how large `combined` is. */
+        if (keep > 0) {
+            UCHAR tail[MTP_MAX_PKT_CAP];
+            ULONG start = combined - keep;
+            ULONG t = 0;
+            ULONG i;
+            for (i = start; i < combined; i++) {
+                tail[t++] = (i < g_UploadCarryLen)
+                                ? g_UploadCarry[i]
+                                : ((PUCHAR)Blob)[i - g_UploadCarryLen];
+            }
+            RtlCopyMemory(g_UploadCarry, tail, keep);
+        }
+        g_UploadCarryLen = keep;
+        return STATUS_SUCCESS;
+    }
+
+    /* Final flush: one write with everything left. */
+    if (combined > 0) {
+        buf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, combined, 'umtp');
+        if (!buf) return STATUS_INSUFFICIENT_RESOURCES;
+        if (g_UploadCarryLen) RtlCopyMemory(buf, g_UploadCarry, g_UploadCarryLen);
+        RtlCopyMemory(buf + g_UploadCarryLen, Blob, BlobLen);
+        status = MtpUsb_WriteBulk(Device, OutPipe, buf, combined);
+        ExFreePoolWithTag(buf, 'umtp');
+        g_UploadCarryLen = 0;
+        if (!NT_SUCCESS(status)) return status;
+    }
+    g_UploadCarryLen = 0;
+
+    /* If the whole stream was max-packet aligned, no short packet was emitted;
+     * send a ZLP so the responder ends the data phase. */
+    if ((TotalStreamLen % maxPkt) == 0) {
+        status = MtpUsb_WriteZlp(Device, OutPipe);
+    }
+    return status;
+}
+
 static VOID
 MtpAddInitialObject(ULONG Id, const char *Name, USHORT Format, ULONG ParentId, const char *InitialData, ULONG DataLen)
 {
@@ -161,7 +315,12 @@ MtpInitializeDevice(WDFDEVICE Device)
     InitializeListHead(&gResponseList);
     KeInitializeEvent(&gResponseEvent, NotificationEvent, FALSE);
 
-    // Pre-populate standard phone storage objects (matches QEMU phone storage)
+    /* Initially assume no real device is present (will be set TRUE in OpenSession
+     * when USB pipes respond successfully to MTP OpenSession command). */
+    g_bRealDevicePresent = FALSE;
+
+    /* Pre-populate standard phone storage objects as fallback
+     * (only used when NO real USB device responds, i.e. pure emulation mode). */
     MtpAddInitialObject(1, "Welcome_Phone.txt", 0x3004, 0, "Welcome to Windows 2000 MTP Driver!\r\nPhone storage connected.\r\n", 58);
     MtpAddInitialObject(2, "DCIM", 0x3001, 0, NULL, 0);
     MtpAddInitialObject(3, "Documents", 0x3001, 0, NULL, 0);
@@ -307,6 +466,9 @@ MtpGetObjectPart(WDFREQUEST Request)
     size_t outCap;
     PMTP_OBJECT obj;
     ULONG toCopy;
+    WDFDEVICE device;
+    WDFUSBPIPE inPipe;
+    WDFUSBPIPE outPipe;
 
     status = WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG) * 3, &inBuf, &inLen);
     if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return status; }
@@ -329,81 +491,212 @@ MtpGetObjectPart(WDFREQUEST Request)
 
     offset = ((ULONGLONG)offsetHigh << 32) | (ULONGLONG)offsetLow;
 
-    obj = MtpFindObject(id);
-    if (obj) {
-        /* Object in internal/fallback catalog */
-        if (offset >= (ULONGLONG)obj->Size) {
-            WdfRequestComplete(Request, STATUS_END_OF_FILE);
-            return STATUS_END_OF_FILE;
+    /* When no real device is present, use in-memory emulation catalog */
+    if (!g_bRealDevicePresent) {
+        obj = MtpFindObject(id);
+        if (obj) {
+            if (offset >= (ULONGLONG)obj->Size) {
+                WdfRequestComplete(Request, STATUS_END_OF_FILE);
+                return STATUS_END_OF_FILE;
+            }
+
+            toCopy = length;
+            if (offset + toCopy > (ULONGLONG)obj->Size) {
+                toCopy = (ULONG)((ULONGLONG)obj->Size - offset);
+            }
+            if (toCopy > outCap) toCopy = (ULONG)outCap;
+
+            WdfSpinLockAcquire(gObjectLock);
+            RtlCopyMemory(outBuf, (PUCHAR)obj->Data + offset, toCopy);
+            WdfSpinLockRelease(gObjectLock);
+
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, toCopy);
+            return STATUS_SUCCESS;
+        }
+        WdfRequestComplete(Request, STATUS_NOT_FOUND);
+        return STATUS_NOT_FOUND;
+    }
+
+    /* Real USB MTP device: Stream directly from Bulk IN pipe!
+     * Universal compatibility: uses standard MTP GetObject (0x1009).
+     * Chunk-by-chunk streaming with O(1) kernel memory. */
+    device = WdfRequestGetDevice(Request);
+    inPipe = MtpUsb_GetBulkInPipe(device);
+    outPipe = MtpUsb_GetBulkOutPipe(device);
+    if (!inPipe || !outPipe) {
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE);
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    if (offset == 0) {
+        ULONG opLen = 0;
+        ULONG tid = 0;
+        PVOID opBuf = NULL;
+        ULONG bytesRead = 0;
+        ULONG containerLen = 0;
+        USHORT containerType = 0;
+        USHORT containerCode = 0;
+        ULONGLONG totalPayload = 0;
+        ULONG avail = 0;
+
+        /* Reset any prior download */
+        if (g_ActiveDownloadBuf) {
+            ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+            g_ActiveDownloadBuf = NULL;
+        }
+        g_ActiveDownloadId = 0;
+
+        /* Send MTP_OP_GET_OBJECT (0x1009) */
+        opBuf = MtpBuildOperationContainer(MTP_OP_GET_OBJECT, &id, 1, &opLen, &tid);
+        if (!opBuf) {
+            WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES);
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
+        status = MtpUsb_WriteBulk(device, outPipe, opBuf, opLen);
+        ExFreePoolWithTag(opBuf, 'omtp');
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("MTP: GetObject WriteBulk failed 0x%08x\n", status));
+            WdfRequestComplete(Request, status);
+            return status;
+        }
+
+        /* Allocate 64KB read buffer */
+        g_ActiveDownloadBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, 65536, 'rmtp');
+        if (!g_ActiveDownloadBuf) {
+            WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /* Read first packet (DATA container header + first chunk) */
+        status = MtpUsb_ReadBulk(device, inPipe, g_ActiveDownloadBuf, 65536, &bytesRead);
+        if (!NT_SUCCESS(status) || bytesRead < 12) {
+            KdPrint(("MTP: GetObject ReadBulk failed 0x%08x (bytes=%lu)\n", status, bytesRead));
+            ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+            g_ActiveDownloadBuf = NULL;
+            WdfRequestComplete(Request, NT_SUCCESS(status) ? STATUS_DEVICE_DATA_ERROR : status);
+            return NT_SUCCESS(status) ? STATUS_DEVICE_DATA_ERROR : status;
+        }
+
+        RtlCopyMemory(&containerLen, g_ActiveDownloadBuf, sizeof(ULONG));
+        RtlCopyMemory(&containerType, g_ActiveDownloadBuf + 4, sizeof(USHORT));
+        RtlCopyMemory(&containerCode, g_ActiveDownloadBuf + 6, sizeof(USHORT));
+
+        if (containerType == 3) {
+            /* Device returned error response code directly (e.g. 0x2009 InvalidObjectHandle) */
+            KdPrint(("MTP: GetObject device returned error code 0x%04x\n", (ULONG)containerCode));
+            ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+            g_ActiveDownloadBuf = NULL;
+            WdfRequestComplete(Request, STATUS_NOT_FOUND);
+            return STATUS_NOT_FOUND;
+        }
+
+        /* containerType == 2 is Data container */
+        totalPayload = (containerLen >= 12) ? (containerLen - 12) : 0;
+        if (containerLen == 0xFFFFFFFF) {
+            totalPayload = 0xFFFFFFFFFFFFFFFFULL; /* Unspecified length streaming */
+        }
+
+        avail = bytesRead - 12;
         toCopy = length;
-        if (offset + toCopy > (ULONGLONG)obj->Size) {
-            toCopy = (ULONG)((ULONGLONG)obj->Size - offset);
-        }
-        if (toCopy > outCap) toCopy = (ULONG)outCap;
+        if ((ULONGLONG)toCopy > (ULONGLONG)outCap) toCopy = (ULONG)outCap;
+        if ((ULONGLONG)toCopy > (ULONGLONG)avail) toCopy = avail;
 
-        WdfSpinLockAcquire(gObjectLock);
-        RtlCopyMemory(outBuf, (PUCHAR)obj->Data + offset, toCopy);
-        WdfSpinLockRelease(gObjectLock);
+        RtlCopyMemory(outBuf, g_ActiveDownloadBuf + 12, toCopy);
+
+        g_ActiveDownloadId = id;
+        g_ActiveDownloadTotal = totalPayload;
+        g_ActiveDownloadOffset = toCopy;
+        g_ActiveDownloadRemaining = (totalPayload > (ULONGLONG)toCopy) ? (totalPayload - (ULONGLONG)toCopy) : 0;
+
+        if (avail > toCopy) {
+            g_ActiveDownloadBufPos = 12 + toCopy;
+            g_ActiveDownloadBufLen = bytesRead;
+        } else {
+            g_ActiveDownloadBufPos = 0;
+            g_ActiveDownloadBufLen = 0;
+        }
+
+        /* If whole file fit in the first read */
+        if (g_ActiveDownloadRemaining == 0) {
+            if (bytesRead <= 12 + toCopy) {
+                ULONG respBytes = 0;
+                MtpUsb_ReadBulk(device, inPipe, g_ActiveDownloadBuf, 512, &respBytes);
+            }
+            ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+            g_ActiveDownloadBuf = NULL;
+            g_ActiveDownloadId = 0;
+        }
 
         WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, toCopy);
         return STATUS_SUCCESS;
     }
 
-    /* Object is on real connected MTP / PTP hardware device:
-     * Pure streaming! We use GetPartialObject (0x101B) or GetPartialObject64 (0x95C1)
-     * to request ONLY this chunk from the device directly into outBuf.
-     * Kernel memory consumption is strictly O(1) - NO giant buffer in RAM!
-     */
-    {
-        PVOID chunkData = NULL;
-        size_t chunkDataLen = 0;
-        USHORT respCode = 0;
-        ULONG params[4];
+    /* offset > 0: continuation of active stream */
+    if (id == g_ActiveDownloadId && offset == g_ActiveDownloadOffset) {
+        ULONG avail = 0;
 
-        if (offsetHigh == 0) {
-            /* Standard 32-bit offset: MTP_OP_GET_PARTIAL_OBJECT (0x101B) */
-            params[0] = id;
-            params[1] = offsetLow;
-            params[2] = length;
-            status = MtpSendOperationAndReceiveData(WdfRequestGetDevice(Request), MTP_OP_GET_PARTIAL_OBJECT,
-                                                    params, 3, NULL, 0, &chunkData, &chunkDataLen, &respCode);
-        } else {
-            /* 64-bit offset (files >= 4 GB): MTP_OP_GET_PARTIAL_OBJECT_64 (0x95C1) */
-            params[0] = id;
-            params[1] = offsetLow;
-            params[2] = offsetHigh;
-            params[3] = length;
-            status = MtpSendOperationAndReceiveData(WdfRequestGetDevice(Request), MTP_OP_GET_PARTIAL_OBJECT_64,
-                                                    params, 4, NULL, 0, &chunkData, &chunkDataLen, &respCode);
-        }
-
-        /* Fallback for legacy devices that only support single-shot 0x1009 (GetObject) */
-        if (!NT_SUCCESS(status) || !chunkData || chunkDataLen == 0) {
-            if (offset == 0) {
-                ULONG getParam = id;
-                status = MtpSendOperationAndReceiveData(WdfRequestGetDevice(Request), MTP_OP_GET_OBJECT,
-                                                        &getParam, 1, NULL, 0, &chunkData, &chunkDataLen, &respCode);
+        /* If buffer is empty but more data remains, refill 64KB staging buffer from USB Bulk IN */
+        if (g_ActiveDownloadBuf && g_ActiveDownloadBufPos >= g_ActiveDownloadBufLen && g_ActiveDownloadRemaining > 0) {
+            ULONG bytesRead = 0;
+            status = MtpUsb_ReadBulk(device, inPipe, g_ActiveDownloadBuf, 65536, &bytesRead);
+            if (!NT_SUCCESS(status) || bytesRead == 0) {
+                KdPrint(("MTP: Stream ReadBulk refill failed 0x%08x\n", status));
+                MtpResetStreaming();
+                WdfRequestComplete(Request, NT_SUCCESS(status) ? STATUS_END_OF_FILE : status);
+                return NT_SUCCESS(status) ? STATUS_END_OF_FILE : status;
             }
+            g_ActiveDownloadBufPos = 0;
+            g_ActiveDownloadBufLen = bytesRead;
         }
 
-        if (NT_SUCCESS(status) && chunkData && chunkDataLen > 0) {
-            toCopy = (ULONG)chunkDataLen;
-            if (toCopy > outCap) toCopy = (ULONG)outCap;
-            RtlCopyMemory(outBuf, chunkData, toCopy);
-            ExFreePoolWithTag(chunkData, 'dout');
+        /* If we have available bytes in the staging buffer */
+        if (g_ActiveDownloadBuf && g_ActiveDownloadBufLen > g_ActiveDownloadBufPos) {
+            avail = g_ActiveDownloadBufLen - g_ActiveDownloadBufPos;
+            toCopy = length;
+            if ((ULONGLONG)toCopy > (ULONGLONG)outCap) toCopy = (ULONG)outCap;
+            if ((ULONGLONG)toCopy > (ULONGLONG)avail) toCopy = avail;
+            if ((ULONGLONG)toCopy > g_ActiveDownloadRemaining) toCopy = (ULONG)g_ActiveDownloadRemaining;
+
+            RtlCopyMemory(outBuf, g_ActiveDownloadBuf + g_ActiveDownloadBufPos, toCopy);
+            g_ActiveDownloadBufPos += toCopy;
+            g_ActiveDownloadOffset += toCopy;
+            if (g_ActiveDownloadRemaining >= (ULONGLONG)toCopy) {
+                g_ActiveDownloadRemaining -= (ULONGLONG)toCopy;
+            } else {
+                g_ActiveDownloadRemaining = 0;
+            }
+
+            /* If download finished, read RESPONSE container if needed and cleanup */
+            if (g_ActiveDownloadRemaining == 0) {
+                if (g_ActiveDownloadBufPos >= g_ActiveDownloadBufLen) {
+                    ULONG respBytes = 0;
+                    MtpUsb_ReadBulk(device, inPipe, g_ActiveDownloadBuf, 512, &respBytes);
+                }
+                ExFreePoolWithTag(g_ActiveDownloadBuf, 'rmtp');
+                g_ActiveDownloadBuf = NULL;
+                g_ActiveDownloadId = 0;
+            }
+
             WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, toCopy);
             return STATUS_SUCCESS;
         }
 
-        if (chunkData) ExFreePoolWithTag(chunkData, 'dout');
-        WdfRequestComplete(Request, STATUS_NOT_FOUND);
-        return STATUS_NOT_FOUND;
+        /* If no more data remaining */
+        if (g_ActiveDownloadRemaining == 0) {
+            MtpResetStreaming();
+            WdfRequestComplete(Request, STATUS_END_OF_FILE);
+            return STATUS_END_OF_FILE;
+        }
     }
+
+    /* Out of order or unexpected ID */
+    MtpResetStreaming();
+    WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+    return STATUS_INVALID_PARAMETER;
 }
 
-// Input for send object part: [ULONG Id][ULONG Offset][data...]
+// Input for send object part: [ULONG Id][ULONG Offset][ULONG TotalSize][data...]
 NTSTATUS
 MtpSendObjectPart(WDFREQUEST Request)
 {
@@ -413,75 +706,228 @@ MtpSendObjectPart(WDFREQUEST Request)
     PULONG p;
     ULONG id;
     ULONG offset;
+    ULONG totalSize = 0;
     PVOID data;
     ULONG dataLen;
     PMTP_OBJECT obj;
     PVOID outBuf;
     size_t outCap;
+    WDFDEVICE device;
+    WDFUSBPIPE outPipe;
+    WDFUSBPIPE inPipe;
 
-    status = WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG)*2 + 1, &inBuf, &inLen);
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG) * 2 + 1, &inBuf, &inLen);
     if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return status; }
 
     p = (PULONG)inBuf;
     id = p[0];
     offset = p[1];
-    data = (PVOID)((PUCHAR)inBuf + sizeof(ULONG)*2);
-    dataLen = (ULONG)(inLen - sizeof(ULONG)*2);
 
-    obj = NULL;
-    if (id == 0 && offset == 0) {
-        obj = (PMTP_OBJECT)ExAllocatePoolWithTag(NonPagedPool, sizeof(MTP_OBJECT), 'mtpO');
-        if (!obj) { WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
-        RtlZeroMemory(obj, sizeof(*obj));
-        obj->Id = gNextObjectId++;
-        obj->AllocSize = dataLen;
-        obj->Size = dataLen;
-        RtlCopyMemory(obj->Name, "uploaded.bin", sizeof("uploaded.bin"));
-        obj->Data = ExAllocatePoolWithTag(NonPagedPool, obj->AllocSize, 'mtpD');
-        if (!obj->Data) { ExFreePoolWithTag(obj, 'mtpO'); WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
-        if (dataLen) RtlCopyMemory(obj->Data, data, dataLen);
+    if (inLen >= sizeof(ULONG) * 3) {
+        totalSize = p[2];
+        data = (PVOID)((PUCHAR)inBuf + sizeof(ULONG) * 3);
+        dataLen = (ULONG)(inLen - sizeof(ULONG) * 3);
+    } else {
+        totalSize = 0;
+        data = (PVOID)((PUCHAR)inBuf + sizeof(ULONG) * 2);
+        dataLen = (ULONG)(inLen - sizeof(ULONG) * 2);
+    }
 
-        WdfSpinLockAcquire(gObjectLock);
-        InsertTailList(&gObjectList, &obj->Link);
-        WdfSpinLockRelease(gObjectLock);
+    /* If no real device, fallback to in-memory catalog */
+    if (!g_bRealDevicePresent) {
+        if (id == 0 && offset == 0) {
+            obj = (PMTP_OBJECT)ExAllocatePoolWithTag(NonPagedPool, sizeof(MTP_OBJECT), 'mtpO');
+            if (!obj) { WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
+            RtlZeroMemory(obj, sizeof(*obj));
+            obj->Id = gNextObjectId++;
+            obj->AllocSize = dataLen ? dataLen : 4096;
+            obj->Size = dataLen;
+            RtlCopyMemory(obj->Name, "uploaded.bin", sizeof("uploaded.bin"));
+            obj->Data = ExAllocatePoolWithTag(NonPagedPool, obj->AllocSize, 'mtpD');
+            if (!obj->Data) { ExFreePoolWithTag(obj, 'mtpO'); WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
+            if (dataLen) RtlCopyMemory(obj->Data, data, dataLen);
 
-        status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG), &outBuf, &outCap);
-        if (NT_SUCCESS(status) && outCap >= sizeof(ULONG)) {
-            *((PULONG)outBuf) = obj->Id;
-            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(ULONG));
+            WdfSpinLockAcquire(gObjectLock);
+            InsertTailList(&gObjectList, &obj->Link);
+            WdfSpinLockRelease(gObjectLock);
+
+            status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG), &outBuf, &outCap);
+            if (NT_SUCCESS(status) && outCap >= sizeof(ULONG)) {
+                *((PULONG)outBuf) = obj->Id;
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(ULONG));
+                return STATUS_SUCCESS;
+            }
+            WdfRequestComplete(Request, STATUS_SUCCESS);
             return STATUS_SUCCESS;
         }
+
+        obj = MtpFindObject(id);
+        if (!obj) { WdfRequestComplete(Request, STATUS_NOT_FOUND); return STATUS_NOT_FOUND; }
+
+        WdfSpinLockAcquire(gObjectLock);
+        if (offset + dataLen > obj->AllocSize) {
+            ULONG newAlloc = max(offset + dataLen, obj->AllocSize * 2);
+            PVOID newBuf = ExAllocatePoolWithTag(NonPagedPool, newAlloc, 'mtpD');
+            if (!newBuf) { WdfSpinLockRelease(gObjectLock); WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
+            if (obj->Data && obj->Size > 0) RtlCopyMemory(newBuf, obj->Data, obj->Size);
+            if (obj->Data) ExFreePoolWithTag(obj->Data, 'mtpD');
+            obj->Data = newBuf;
+            obj->AllocSize = newAlloc;
+        }
+        if (dataLen) RtlCopyMemory((PUCHAR)obj->Data + offset, data, dataLen);
+        if (offset + dataLen > obj->Size) obj->Size = offset + dataLen;
+        WdfSpinLockRelease(gObjectLock);
 
         WdfRequestComplete(Request, STATUS_SUCCESS);
         return STATUS_SUCCESS;
     }
 
-    obj = MtpFindObject(id);
-    if (!obj) { WdfRequestComplete(Request, STATUS_NOT_FOUND); return STATUS_NOT_FOUND; }
-
-    WdfSpinLockAcquire(gObjectLock);
-    if (offset + dataLen > obj->AllocSize) {
-        ULONG newAlloc;
-        PVOID newBuf;
-        
-        newAlloc = max(offset + dataLen, obj->AllocSize * 2);
-        if (newAlloc < obj->AllocSize + 1024) newAlloc = obj->AllocSize + 1024;
-        newBuf = ExAllocatePoolWithTag(NonPagedPool, newAlloc, 'mtpD');
-        if (!newBuf) { WdfSpinLockRelease(gObjectLock); WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES); return STATUS_INSUFFICIENT_RESOURCES; }
-        RtlCopyMemory(newBuf, obj->Data, obj->Size);
-        ExFreePoolWithTag(obj->Data, 'mtpD');
-        obj->Data = newBuf;
-        obj->AllocSize = newAlloc;
+    /* Real USB MTP device: Stream directly to Bulk OUT pipe! */
+    device = WdfRequestGetDevice(Request);
+    outPipe = MtpUsb_GetBulkOutPipe(device);
+    inPipe = MtpUsb_GetBulkInPipe(device);
+    if (!outPipe || !inPipe) {
+        KdPrint(("MTP: SendObjectPart - no pipes! outPipe=%p inPipe=%p\n", outPipe, inPipe));
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE);
+        return STATUS_INVALID_DEVICE_STATE;
     }
 
-    // write data
-    RtlCopyMemory((PUCHAR)obj->Data + offset, data, dataLen);
-    if (offset + dataLen > obj->Size) obj->Size = offset + dataLen;
-    WdfSpinLockRelease(gObjectLock);
+    KdPrint(("MTP: SendObjectPart id=%u offset=%u totalSize=%u dataLen=%u\n", id, offset, totalSize, dataLen));
+
+    if (offset == 0) {
+        ULONG opLen = 0;
+        ULONG tid = 0;
+        PVOID opBuf = NULL;
+        PUCHAR headerBuf = NULL;
+        ULONG containerTotal = 12 + totalSize;
+        ULONGLONG totalStream = (ULONGLONG)12 + (ULONGLONG)totalSize;
+        BOOLEAN final;
+        PDEVICE_CONTEXT ctx = DeviceGetContext(device);
+
+        g_ActiveUploadId = id;
+        g_ActiveUploadTotal = totalSize;
+        g_ActiveUploadOffset = 0;
+
+        /* Align all data-phase writes to the endpoint max-packet size so the
+         * responder sees a short packet only at the end of the object. */
+        g_UploadMaxPkt = (ctx && ctx->MaxPacketSize) ? ctx->MaxPacketSize : 64;
+        if (g_UploadMaxPkt == 0 || g_UploadMaxPkt > MTP_MAX_PKT_CAP) g_UploadMaxPkt = 64;
+        g_UploadCarryLen = 0;
+
+        /* ---- Drain stale QEMU state before SendObject command phase ----
+         *
+         * QEMU's usb-mtp responder (hw/usb/dev-mtp.c) checks on every new
+         * TYPE_COMMAND whether s->data_in, s->data_out, or s->result is
+         * non-NULL. If any of those are set, it stalls the endpoint with
+         * "transaction inflight". The preceding SendObjectInfo's response
+         * should have been consumed by MtpSendOperationAndReceiveData, but
+         * edge cases (timeouts, resets, piggybacked containers) can leave
+         * stale data on the Bulk IN pipe. Read-and-discard any residual
+         * containers, then reset both endpoints to clear halt conditions. */
+        {
+            PUCHAR drainBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, 512, 'drnm');
+            if (drainBuf) {
+                ULONG drainBytes = 0;
+                int drainAttempts = 0;
+                while (drainAttempts < 3) {
+                    NTSTATUS drainSt = MtpUsb_ReadBulk(device, inPipe, drainBuf, 512, &drainBytes);
+                    if (!NT_SUCCESS(drainSt) || drainBytes == 0) break;
+                    KdPrint(("MTP: SendObjectPart drain: discarded %u bytes (type=%u code=0x%04x)\n",
+                             drainBytes,
+                             (drainBytes >= 6) ? (ULONG)*((PUSHORT)(drainBuf + 4)) : 0,
+                             (drainBytes >= 8) ? (ULONG)*((PUSHORT)(drainBuf + 6)) : 0));
+                    drainAttempts++;
+                }
+                ExFreePoolWithTag(drainBuf, 'drnm');
+            }
+        }
+        /* Endpoint state is already clean after drain reads above;
+         * do NOT reset pipes here — QEMU's usb-mtp treats the resulting
+         * CLEAR_FEATURE control request as "unknown control request" and
+         * permanently stalls with "transaction inflight".  On real hardware
+         * the drain reads above are sufficient to clear residual data. */
+
+        /* Send MTP_OP_SEND_OBJECT (0x100D) command container (its own 12-byte
+         * short-packet transfer — this is the command phase, not the data). */
+        opBuf = MtpBuildOperationContainer(MTP_OP_SEND_OBJECT, NULL, 0, &opLen, &tid);
+        if (!opBuf) {
+            WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        g_ActiveUploadTid = tid;
+
+        status = MtpUsb_WriteBulk(device, outPipe, opBuf, opLen);
+        ExFreePoolWithTag(opBuf, 'omtp');
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("MTP: SendObject WriteBulk failed 0x%08x\n", status));
+            WdfRequestComplete(Request, status);
+            return status;
+        }
+
+        /* Build DATA container header (12 bytes) + first data chunk, then feed
+         * it through the max-packet-aligned streamer. */
+        headerBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, 12 + dataLen, 'dmtp');
+        if (!headerBuf) {
+            WdfRequestComplete(Request, STATUS_INSUFFICIENT_RESOURCES);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        *((PULONG)(headerBuf + 0)) = containerTotal;
+        *((PUSHORT)(headerBuf + 4)) = 2; // Data container
+        *((PUSHORT)(headerBuf + 6)) = MTP_OP_SEND_OBJECT;
+        *((PULONG)(headerBuf + 8)) = g_ActiveUploadTid;
+        if (dataLen > 0) RtlCopyMemory(headerBuf + 12, data, dataLen);
+
+        final = ((ULONGLONG)dataLen >= g_ActiveUploadTotal);
+        status = MtpUploadStreamWrite(device, outPipe, headerBuf, 12 + dataLen, final, totalStream);
+        ExFreePoolWithTag(headerBuf, 'dmtp');
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("MTP: SendObject Data header WriteBulk failed 0x%08x\n", status));
+            WdfRequestComplete(Request, status);
+            return status;
+        }
+
+        g_ActiveUploadOffset = dataLen;
+    } else {
+        /* offset > 0: stream subsequent data chunks */
+        if (dataLen > 0) {
+            ULONGLONG totalStream = (ULONGLONG)12 + g_ActiveUploadTotal;
+            BOOLEAN final = ((g_ActiveUploadOffset + dataLen) >= g_ActiveUploadTotal);
+            status = MtpUploadStreamWrite(device, outPipe, data, dataLen, final, totalStream);
+            if (!NT_SUCCESS(status)) {
+                KdPrint(("MTP: SendObject chunk WriteBulk failed 0x%08x\n", status));
+                WdfRequestComplete(Request, status);
+                return status;
+            }
+            g_ActiveUploadOffset += dataLen;
+        }
+    }
+
+    /* Check if transfer is complete. The data phase was already terminated
+     * (short packet or ZLP) by the final MtpUploadStreamWrite call above. */
+    if (g_ActiveUploadOffset >= g_ActiveUploadTotal) {
+        /* Read RESPONSE container from Bulk IN */
+        {
+            PUCHAR respBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, 512, 'rmtp');
+            if (respBuf) {
+                ULONG respBytes = 0;
+                NTSTATUS readSt = MtpUsb_ReadBulk(device, inPipe, respBuf, 512, &respBytes);
+                if (NT_SUCCESS(readSt) && respBytes >= 12) {
+                    USHORT respCode = *((PUSHORT)(respBuf + 6));
+                    KdPrint(("MTP: SendObject response: code=0x%04x bytes=%u\n", respCode, respBytes));
+                } else {
+                    KdPrint(("MTP: SendObject response read failed: 0x%08x bytes=%u\n", readSt, respBytes));
+                }
+                ExFreePoolWithTag(respBuf, 'rmtp');
+            }
+        }
+        MtpResetStreaming();
+    }
 
     WdfRequestComplete(Request, STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
+
 
 VOID
 MtpUsb_OnDataReceived(IN WDFDEVICE Device, IN PVOID Data, IN size_t Length)
@@ -614,7 +1060,12 @@ MtpBuildOperationContainer(IN USHORT Opcode, IN ULONG *Params, IN ULONG ParamCou
     buf = ExAllocatePoolWithTag(NonPagedPool, len, 'omtp');
     if (!buf) return NULL;
 
-    tid = (ULONG)InterlockedIncrement((PLONG)&gTransactionCounter);
+    if (Opcode == 0x1002) {
+        tid = 0;
+        gTransactionCounter = 0;
+    } else {
+        tid = (ULONG)InterlockedIncrement((PLONG)&gTransactionCounter);
+    }
 
     *((ULONG*)buf) = len;
     *((USHORT*)((PUCHAR)buf + 4)) = 1; // Operation container
@@ -654,12 +1105,14 @@ MtpSendOperationAndReceiveData(
     ULONG dlen;
     PVOID dBuf;
     PUCHAR readBuf;
-    const ULONG READ_BUF_SIZE = 16384;
+    ULONG readBufSize;
     ULONG bytesRead;
     ULONG containerLen;
     USHORT containerType;
     USHORT containerCode;
     ULONG containerTid;
+    ULONG respParamsLen;
+    PVOID respParams;
 
     *OutData = NULL;
     *OutDataLen = 0;
@@ -703,11 +1156,17 @@ MtpSendOperationAndReceiveData(
         }
     }
 
-    readBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, READ_BUF_SIZE, 'rmtp');
+    if (Opcode == 0x1007 || Opcode == 0x9805) {
+        readBufSize = 262144; /* 256 KB for large object handle lists */
+    } else {
+        readBufSize = 4096;   /* 4 KB fits in 1 physical page; prevents NonPagedPool fragmentation on Win2K */
+    }
+
+    readBuf = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, readBufSize, 'rmtp');
     if (!readBuf) return STATUS_INSUFFICIENT_RESOURCES;
 
     bytesRead = 0;
-    st = MtpUsb_ReadBulk(Device, inPipe, readBuf, READ_BUF_SIZE, &bytesRead);
+    st = MtpUsb_ReadBulk(Device, inPipe, readBuf, readBufSize, &bytesRead);
     if (!NT_SUCCESS(st)) {
         KdPrint(("MTP: ReadBulk failed 0x%08x for opcode 0x%04x\n", st, Opcode));
         ExFreePoolWithTag(readBuf, 'rmtp');
@@ -729,11 +1188,53 @@ MtpSendOperationAndReceiveData(
     RtlCopyMemory(&containerCode, readBuf + 6, sizeof(USHORT));
     RtlCopyMemory(&containerTid, readBuf + 8, sizeof(ULONG));
 
+    /* Drain any stale packets belonging to prior timed-out or aborted transactions */
+    while (tid != 0 && containerTid != 0 && containerTid != tid) {
+        KdPrint(("MTP: Stale packet on pipe (type=%u, len=%u, code=0x%04x, tid=%u, expected=%u), draining...\n",
+                 (ULONG)containerType, containerLen, (ULONG)containerCode, containerTid, tid));
+
+        /* If this was a DATA container (Type 2), drain any remaining bytes of this container */
+        if (containerType == 2 && containerLen > bytesRead) {
+            ULONG remainingStale = containerLen - bytesRead;
+            while (remainingStale > 0) {
+                ULONG toDrain = (remainingStale < readBufSize) ? remainingStale : readBufSize;
+                ULONG chunkDrained = 0;
+                st = MtpUsb_ReadBulk(Device, inPipe, readBuf, toDrain, &chunkDrained);
+                if (!NT_SUCCESS(st) || chunkDrained == 0) break;
+                if (remainingStale >= chunkDrained) {
+                    remainingStale -= chunkDrained;
+                } else {
+                    remainingStale = 0;
+                }
+            }
+        }
+
+        /* Read next packet */
+        bytesRead = 0;
+        st = MtpUsb_ReadBulk(Device, inPipe, readBuf, readBufSize, &bytesRead);
+        if (!NT_SUCCESS(st) || bytesRead < 12) {
+            KdPrint(("MTP: Read after drain failed 0x%08x (bytes=%lu)\n", st, bytesRead));
+            ExFreePoolWithTag(readBuf, 'rmtp');
+            return NT_SUCCESS(st) ? STATUS_DEVICE_DATA_ERROR : st;
+        }
+
+        containerLen = 0;
+        containerType = 0;
+        containerCode = 0;
+        containerTid = 0;
+        RtlCopyMemory(&containerLen, readBuf, sizeof(ULONG));
+        RtlCopyMemory(&containerType, readBuf + 4, sizeof(USHORT));
+        RtlCopyMemory(&containerCode, readBuf + 6, sizeof(USHORT));
+        RtlCopyMemory(&containerTid, readBuf + 8, sizeof(ULONG));
+    }
+
     // Handle DATA container (Type 2)
     if (containerType == 2) {
         ULONG payloadLen;
         ULONG copied;
         PVOID fullData;
+        ULONG excessBytes = 0;
+        PUCHAR excessPtr = NULL;
 
         payloadLen = (containerLen > 12) ? (containerLen - 12) : 0;
         copied = 0;
@@ -750,50 +1251,70 @@ MtpSendOperationAndReceiveData(
             if (copied > payloadLen) copied = payloadLen;
             RtlCopyMemory(fullData, readBuf + 12, copied);
 
+            if (bytesRead > 12 + payloadLen) {
+                excessBytes = bytesRead - (12 + payloadLen);
+                excessPtr = readBuf + (12 + payloadLen);
+            }
+
             // Read remaining data chunks if buffer spanned multiple reads
             while (copied < payloadLen) {
-                ULONG chunkRead;
-                ULONG toCopy;
-                chunkRead = 0;
-                toCopy = 0;
-                st = MtpUsb_ReadBulk(Device, inPipe, readBuf, READ_BUF_SIZE, &chunkRead);
-                if (!NT_SUCCESS(st) || chunkRead == 0) break;
+                ULONG chunkRead = 0;
+                ULONG toCopy = 0;
+                st = MtpUsb_ReadBulk(Device, inPipe, readBuf, readBufSize, &chunkRead);
+                if (!NT_SUCCESS(st) || chunkRead == 0) {
+                    KdPrint(("MTP: Multi-chunk read stopped: st=0x%08x chunk=%u copied=%u/%u\n", st, chunkRead, copied, payloadLen));
+                    break;
+                }
                 toCopy = chunkRead;
-                if (copied + toCopy > payloadLen) toCopy = payloadLen - copied;
+                if (copied + toCopy > payloadLen) {
+                    toCopy = payloadLen - copied;
+                    excessBytes = chunkRead - toCopy;
+                    excessPtr = readBuf + toCopy;
+                } else {
+                    excessBytes = 0;
+                    excessPtr = NULL;
+                }
                 RtlCopyMemory((PUCHAR)fullData + copied, readBuf, toCopy);
                 copied += toCopy;
             }
 
             *OutData = fullData;
             *OutDataLen = copied;
+        } else {
+            if (bytesRead > 12) {
+                excessBytes = bytesRead - 12;
+                excessPtr = readBuf + 12;
+            }
         }
 
-        // Check if RESPONSE container was concatenated in the same buffer
-        if (bytesRead >= containerLen + 12) {
-            USHORT respType;
-            USHORT respCode;
-            respType = 0;
-            respCode = 0;
-            RtlCopyMemory(&respType, readBuf + containerLen + 4, sizeof(USHORT));
-            RtlCopyMemory(&respCode, readBuf + containerLen + 6, sizeof(USHORT));
+        // Parse RESPONSE container
+        if (excessBytes >= 12 && excessPtr) {
+            USHORT respType = 0;
+            USHORT respCode = 0;
+            RtlCopyMemory(&respType, excessPtr + 4, sizeof(USHORT));
+            RtlCopyMemory(&respCode, excessPtr + 6, sizeof(USHORT));
             if (respType == 3) {
                 *OutResponse = respCode;
             }
         } else {
             // Read next packet from Bulk IN for the RESPONSE container
-            ULONG respBytes;
-            USHORT respType;
-            USHORT respCode;
-            respBytes = 0;
-            respType = 0;
-            respCode = 0;
-            st = MtpUsb_ReadBulk(Device, inPipe, readBuf, READ_BUF_SIZE, &respBytes);
+            ULONG respBytes = 0;
+            USHORT respType = 0;
+            USHORT respCode = 0;
+            st = MtpUsb_ReadBulk(Device, inPipe, readBuf, readBufSize, &respBytes);
+            if (NT_SUCCESS(st) && respBytes == 0) {
+                /* Handled ZLP (Zero-Length Packet) terminating data phase; read RESPONSE container */
+                respBytes = 0;
+                st = MtpUsb_ReadBulk(Device, inPipe, readBuf, readBufSize, &respBytes);
+            }
             if (NT_SUCCESS(st) && respBytes >= 12) {
                 RtlCopyMemory(&respType, readBuf + 4, sizeof(USHORT));
                 RtlCopyMemory(&respCode, readBuf + 6, sizeof(USHORT));
                 if (respType == 3) {
                     *OutResponse = respCode;
                 }
+            } else {
+                KdPrint(("MTP: Response read st=0x%08x bytes=%u\n", st, respBytes));
             }
         }
 
@@ -804,8 +1325,17 @@ MtpSendOperationAndReceiveData(
     // Handle RESPONSE container (Type 3)
     if (containerType == 3) {
         *OutResponse = containerCode;
+        respParamsLen = (containerLen > 12) ? (containerLen - 12) : 0;
+        if (respParamsLen > 0 && bytesRead >= 12 + respParamsLen) {
+            respParams = ExAllocatePoolWithTag(NonPagedPool, respParamsLen, 'dout');
+            if (respParams) {
+                RtlCopyMemory(respParams, readBuf + 12, respParamsLen);
+                *OutData = respParams;
+                *OutDataLen = respParamsLen;
+            }
+        }
         ExFreePoolWithTag(readBuf, 'rmtp');
-        return STATUS_SUCCESS;
+        return (containerCode == 0x2001 || containerCode == 0x201E) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
     }
 
     KdPrint(("MTP: Unexpected container type %u\n", (ULONG)containerType));
@@ -844,12 +1374,30 @@ MtpSessionOpen(WDFREQUEST Request)
                                             NULL, 0, &respData, &respLen, &respCode);
     if (respData) ExFreePoolWithTag(respData, 'dout');
 
+    /* If session was already open from a previous run, cleanly reset it with CloseSession then OpenSession */
+    if (respCode == 0x201E) {
+        KdPrint(("MTP: Session already open on device, resetting cleanly\n"));
+        respData = NULL;
+        MtpSendOperationAndReceiveData(device, 0x1003, NULL, 0, NULL, 0, &respData, &respLen, &respCode);
+        if (respData) ExFreePoolWithTag(respData, 'dout');
+
+        respData = NULL;
+        status = MtpSendOperationAndReceiveData(device, 0x1002, &sessionParam, 1,
+                                                NULL, 0, &respData, &respLen, &respCode);
+        if (respData) ExFreePoolWithTag(respData, 'dout');
+    }
+
     /* Accept OK (0x2001) or SessionAlreadyOpen (0x201E) as success */
     if (!NT_SUCCESS(status)) {
         KdPrint(("MTP: OpenSession USB send failed 0x%08x\n", status));
-        /* Fall through - still report the local session so the app can try operations */
+        /* USB send failed => no real device, use emulation catalog */
+        g_bRealDevicePresent = FALSE;
     } else {
         KdPrint(("MTP: OpenSession response code 0x%04x\n", (ULONG)respCode));
+        if (respCode == 0x2001 || respCode == 0x201E) {
+            g_bRealDevicePresent = TRUE;
+            KdPrint(("MTP: Real USB device detected, bypassing fake catalog\n"));
+        }
     }
 
     status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG), &outBuf, &outCap);
@@ -868,7 +1416,6 @@ MtpSessionClose(WDFREQUEST Request)
 {
     WDFDEVICE device;
     PDEVICE_CONTEXT ctx;
-    ULONG sessionParam;
     PVOID respData;
     size_t respLen;
     USHORT respCode;
@@ -877,19 +1424,20 @@ MtpSessionClose(WDFREQUEST Request)
     device = WdfRequestGetDevice(Request);
     ctx = DeviceGetContext(device);
 
-    /* Send the actual MTP CloseSession (0x1003) command */
+    /* Send PTP CloseSession (0x1003) command per ISO 15740 (0 parameters) */
     if (ctx->SessionId != 0) {
-        sessionParam = ctx->SessionId;
         respData = NULL;
         respLen = 0;
         respCode = 0;
-        status = MtpSendOperationAndReceiveData(device, 0x1003, &sessionParam, 1,
+        status = MtpSendOperationAndReceiveData(device, 0x1003, NULL, 0,
                                                 NULL, 0, &respData, &respLen, &respCode);
         if (respData) ExFreePoolWithTag(respData, 'dout');
         KdPrint(("MTP: CloseSession response 0x%04x (st=0x%08x)\n", (ULONG)respCode, status));
     }
 
     ctx->SessionId = 0;
+    g_bRealDevicePresent = FALSE;
+    MtpResetStreaming();
     WdfRequestComplete(Request, STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
@@ -905,6 +1453,7 @@ MtpOperation(WDFREQUEST Request)
     ULONG opcode;
     ULONG paramCount;
     ULONG params[5];
+    ULONG maxParams;
     size_t offset;
     PVOID data;
     size_t dataLen;
@@ -923,6 +1472,32 @@ MtpOperation(WDFREQUEST Request)
     p = (PULONG)inBuf;
     opcode = p[0];
 
+    maxParams = 5;
+    switch (opcode) {
+        case 0x1001: maxParams = 0; break; /* GetDeviceInfo */
+        case 0x1002: maxParams = 1; break; /* OpenSession */
+        case 0x1003: maxParams = 0; break; /* CloseSession: 0 params per ISO 15740 */
+        case 0x1004: maxParams = 0; break; /* GetStorageIDs */
+        case 0x1005: maxParams = 1; break; /* GetStorageInfo */
+        case 0x1007: maxParams = 3; break; /* GetObjectHandles */
+        case 0x1008: maxParams = 1; break; /* GetObjectInfo */
+        case 0x1009: maxParams = 1; break; /* GetObject */
+        case 0x100A: maxParams = 1; break; /* GetThumb */
+        case 0x100B: maxParams = 1; break; /* DeleteObject */
+        case 0x100C: maxParams = 2; break; /* SendObjectInfo: StorageID, ParentObject */
+        case 0x100D: maxParams = 0; break; /* SendObject */
+        case 0x1014: maxParams = 1; break; /* GetDevicePropDesc */
+        case 0x1015: maxParams = 1; break; /* GetDevicePropValue */
+        case 0x1016: maxParams = 1; break; /* SetDevicePropValue */
+        case 0x9801: maxParams = 1; break; /* GetObjectPropsSupported */
+        case 0x9802: maxParams = 2; break; /* GetObjectPropDesc */
+        case 0x9803: maxParams = 2; break; /* GetObjectPropValue */
+        case 0x9804: maxParams = 2; break; /* SetObjectPropValue */
+        case 0x9805: maxParams = 5; break; /* GetObjectPropList */
+        case 0x9806: maxParams = 0; break; /* SetObjectPropList */
+        default:     maxParams = 5; break;
+    }
+
     paramCount = 0;
     params[0] = 0;
     params[1] = 0;
@@ -930,7 +1505,7 @@ MtpOperation(WDFREQUEST Request)
     params[3] = 0;
     params[4] = 0;
     offset = sizeof(ULONG);
-    while (paramCount < 5 && offset + sizeof(ULONG) <= inLen) {
+    while (paramCount < maxParams && offset + sizeof(ULONG) <= inLen) {
         params[paramCount++] = *((PULONG)((PUCHAR)inBuf + offset));
         offset += sizeof(ULONG);
     }
@@ -983,7 +1558,7 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x1004) {
+        if (opcode == 0x1004 && !g_bRealDevicePresent) {
             // GetStorageIDs
             status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG) * 2, &outBuf, &outCap);
             if (NT_SUCCESS(status)) {
@@ -995,7 +1570,7 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x1005) {
+        if (opcode == 0x1005 && !g_bRealDevicePresent) {
             // GetStorageInfo - MTP StorageInfo dataset per PTP/MTP spec:
             // Offset  0: StorageType      (UINT16)  - 3 = FixedRAM
             // Offset  2: FilesystemType   (UINT16)  - 2 = GenericHierarchical
@@ -1048,8 +1623,8 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x1007) {
-            // GetObjectHandles
+        if (opcode == 0x1007 && !g_bRealDevicePresent) {
+            /* GetObjectHandles fallback: only use fake catalog when no real device */
             PLIST_ENTRY entry;
             PMTP_OBJECT objEntry;
             ULONG count = 0;
@@ -1077,8 +1652,8 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x1008 && paramCount >= 1) {
-            // GetObjectInfo
+        if (opcode == 0x1008 && paramCount >= 1 && !g_bRealDevicePresent) {
+            /* GetObjectInfo fallback: only use fake catalog when no real device */
             PMTP_OBJECT objInfo = MtpFindObject(params[0]);
             if (objInfo) {
                 status = WdfRequestRetrieveOutputBuffer(Request, 64, &outBuf, &outCap);
@@ -1109,8 +1684,8 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x1009 && paramCount >= 1) {
-            // GetObject
+        if (opcode == 0x1009 && paramCount >= 1 && !g_bRealDevicePresent) {
+            /* GetObject fallback: only use fake catalog when no real device */
             PMTP_OBJECT objGet = MtpFindObject(params[0]);
             if (objGet && objGet->Data && objGet->Size > 0) {
                 status = WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outCap);
@@ -1123,8 +1698,8 @@ MtpOperation(WDFREQUEST Request)
             }
         }
 
-        if (opcode == 0x100B && paramCount >= 1) {
-            // DeleteObject
+        if (opcode == 0x100B && paramCount >= 1 && !g_bRealDevicePresent) {
+            /* DeleteObject fallback: only use fake catalog when no real device */
             PMTP_OBJECT delObj = MtpFindObject(params[0]);
             if (delObj) {
                 WdfSpinLockAcquire(gObjectLock);
@@ -1137,6 +1712,18 @@ MtpOperation(WDFREQUEST Request)
             if (NT_SUCCESS(status)) {
                 *((PULONG)outBuf) = 0x2001; // OK
                 WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(ULONG));
+                return STATUS_SUCCESS;
+            }
+        }
+
+        if (opcode == 0x100C && !g_bRealDevicePresent) {
+            status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG) * 3, &outBuf, &outCap);
+            if (NT_SUCCESS(status) && outCap >= sizeof(ULONG) * 3) {
+                PULONG pResp = (PULONG)outBuf;
+                pResp[0] = params[0]; /* StorageID */
+                pResp[1] = params[1]; /* ParentObject */
+                pResp[2] = gNextObjectId++; /* Reserved ObjectHandle */
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(ULONG) * 3);
                 return STATUS_SUCCESS;
             }
         }
@@ -1210,6 +1797,8 @@ MtpCleanupDevice(WDFDEVICE Device)
         }
         WdfSpinLockRelease(gObjectLock);
     }
+
+    MtpResetStreaming();
 
     KdPrint(("MTP: Cleanup completed successfully\n"));
     return STATUS_SUCCESS;

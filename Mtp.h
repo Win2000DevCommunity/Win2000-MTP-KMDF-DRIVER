@@ -17,6 +17,8 @@
 #define IOCTL_MTP_SESSION_OPEN           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_READ_DATA)
 #define IOCTL_MTP_SESSION_CLOSE          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_READ_DATA)
 #define IOCTL_MTP_OPERATION              CTL_CODE(FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED, FILE_READ_DATA)
+/* Reset both USB bulk pipes to recover from timeout/desync errors */
+#define IOCTL_MTP_RESET_PIPES            CTL_CODE(FILE_DEVICE_UNKNOWN, 0x813, METHOD_BUFFERED, FILE_READ_DATA)
 
 // Dynamic USB transfer speed & chunk size IOCTL
 #define IOCTL_MTP_GET_TRANSFER_SPEED     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_READ_DATA)
@@ -58,6 +60,12 @@ typedef struct _MTP_GET_PART_REQ {
     ULONG OffsetHigh;
     ULONG Length;
 } MTP_GET_PART_REQ, *PMTP_GET_PART_REQ;
+
+typedef struct _MTP_SEND_PART_REQ {
+    ULONG Id;
+    ULONG Offset;
+    ULONG TotalSize;
+} MTP_SEND_PART_REQ, *PMTP_SEND_PART_REQ;
 #pragma pack(pop)
 
 NTSTATUS MtpInitializeDevice(WDFDEVICE Device);
@@ -67,6 +75,7 @@ NTSTATUS MtpListObjects(WDFREQUEST Request);
 NTSTATUS MtpGetObjectPart(WDFREQUEST Request);
 NTSTATUS MtpSendObjectPart(WDFREQUEST Request);
 NTSTATUS MtpCleanupDevice(WDFDEVICE Device);
+VOID MtpResetStreaming(VOID);
 
 // Internal helper function
 NTSTATUS MtpSendOperationAndReceiveData(IN WDFDEVICE Device, IN USHORT Opcode, IN OPTIONAL ULONG *Params, IN ULONG ParamCount, IN OPTIONAL PVOID Data, IN size_t DataLen, OUT PVOID *OutData, OUT size_t *OutDataLen, OUT USHORT *OutResponse);
@@ -83,6 +92,8 @@ VOID MtpUsb_OnDataReceived(IN WDFDEVICE Device, IN PVOID Data, IN size_t Length)
 NTSTATUS MtpEvtDeviceAdd(IN WDFDRIVER Driver, IN OUT PWDFDEVICE_INIT DeviceInit);
 NTSTATUS MtpEvtDevicePrepareHardware(IN WDFDEVICE Device, IN WDFCMRESLIST ResourcesRaw, IN WDFCMRESLIST ResourcesTranslated);
 NTSTATUS MtpEvtDeviceReleaseHardware(IN WDFDEVICE Device, IN WDFCMRESLIST ResourcesTranslated);
+VOID MtpEvtDeviceSurpriseRemoval(IN WDFDEVICE Device);
 NTSTATUS MtpEvtDeviceD0Entry(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousState);
 NTSTATUS MtpEvtDeviceD0Exit(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetState);
 VOID MtpEvtIoDeviceControl(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN size_t OutputBufferLength, IN size_t InputBufferLength, IN ULONG IoControlCode);
+

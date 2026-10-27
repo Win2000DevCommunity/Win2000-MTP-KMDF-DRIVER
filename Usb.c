@@ -34,7 +34,7 @@ MtpUsb_PrepareHardware(WDFDEVICE Device)
     // Default configuration
     ctx->UsbConfig.ReadBufferSize = 16384;
     ctx->UsbConfig.NumReaders = 2;
-    ctx->UsbConfig.TransferTimeoutMs = 5000;
+    ctx->UsbConfig.TransferTimeoutMs = 15000;
     ctx->UsbConfig.RetryCount = 3;
 
     // Create USB device object if not already created
@@ -121,6 +121,35 @@ MtpUsb_Create(WDFDEVICE Device, PMTP_USB_CONFIG Config)
 }
 
 NTSTATUS
+MtpUsb_ResetPipe(
+    WDFDEVICE Device,
+    WDFUSBPIPE Pipe
+    )
+{
+    NTSTATUS status;
+    PDEVICE_CONTEXT ctx;
+
+    if (!Device || !Pipe) return STATUS_INVALID_PARAMETER;
+
+    ctx = DeviceGetContext(Device);
+    if (!ctx || !ctx->UsbPresent) return STATUS_INVALID_DEVICE_STATE;
+
+    /* Abort all pending I/O on this pipe to drain in-flight URBs and flush the host controller queue.
+     * Note: We deliberately do NOT call WdfUsbTargetPipeResetSynchronously (which sends
+     * CLEAR_FEATURE(ENDPOINT_HALT)) here on timeouts or transient errors. Unconditionally
+     * resetting endpoint halt on an active, non-halted device forces the host controller
+     * data toggle to DATA0 while the phone remains on DATA1, permanently corrupting the
+     * USB link and causing all future requests to fail with error 121 (ERROR_SEM_TIMEOUT). */
+    status = WdfUsbTargetPipeAbortSynchronously(Pipe, NULL, NULL);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: PipeAbort failed 0x%08x\n", status));
+    }
+
+    KdPrint(("MTP: Pipe abort/flush completed\n"));
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
 MtpUsb_WriteBulk(
     WDFDEVICE Device,
     WDFUSBPIPE Pipe,
@@ -145,7 +174,7 @@ MtpUsb_WriteBulk(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 5000;
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 15000;
 
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)Length);
 
@@ -162,6 +191,60 @@ MtpUsb_WriteBulk(
 
     if (!NT_SUCCESS(status)) {
         KdPrint(("MTP: WdfUsbTargetPipeWriteSynchronously failed 0x%08x\n", status));
+        WdfUsbTargetPipeAbortSynchronously(Pipe, NULL, NULL);
+        /* Only issue CLEAR_FEATURE(ENDPOINT_HALT) for genuine USB stalls.
+         * KMDF maps USBD_STATUS_STALL_PID -> STATUS_IO_DEVICE_ERROR.
+         * Do NOT reset on timeouts — that corrupts the DATA0/DATA1 toggle. */
+        if (status == STATUS_IO_DEVICE_ERROR || status == STATUS_SHARING_VIOLATION) {
+            WdfUsbTargetPipeResetSynchronously(Pipe, NULL, NULL);
+        }
+    }
+
+    return status;
+}
+
+NTSTATUS
+MtpUsb_WriteZlp(
+    IN WDFDEVICE Device,
+    IN WDFUSBPIPE Pipe
+    )
+{
+    PDEVICE_CONTEXT ctx;
+    NTSTATUS status;
+    WDF_MEMORY_DESCRIPTOR memDesc;
+    ULONG bytesWritten = 0;
+    WDF_REQUEST_SEND_OPTIONS sendOptions;
+    ULONG timeout;
+    UCHAR dummy = 0;
+
+    if (!Device || !Pipe) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ctx = DeviceGetContext(Device);
+    if (!ctx || !ctx->UsbPresent) {
+        KdPrint(("MTP: USB device not present, aborting ZLP write\n"));
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 5000;
+
+    /* Zero-length transfer: valid buffer pointer, length 0. */
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, &dummy, 0);
+
+    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, 0);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(timeout));
+
+    status = WdfUsbTargetPipeWriteSynchronously(
+        Pipe,
+        NULL,
+        &sendOptions,
+        &memDesc,
+        &bytesWritten
+    );
+
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: ZLP WdfUsbTargetPipeWriteSynchronously failed 0x%08x\n", status));
     }
 
     return status;
@@ -195,7 +278,7 @@ MtpUsb_ReadBulk(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 5000;
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 15000;
 
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)BufferLength);
 
@@ -212,6 +295,13 @@ MtpUsb_ReadBulk(
 
     if (!NT_SUCCESS(status)) {
         KdPrint(("MTP: WdfUsbTargetPipeReadSynchronously failed 0x%08x\n", status));
+        WdfUsbTargetPipeAbortSynchronously(Pipe, NULL, NULL);
+        /* Only issue CLEAR_FEATURE(ENDPOINT_HALT) for genuine USB stalls.
+         * KMDF maps USBD_STATUS_STALL_PID -> STATUS_IO_DEVICE_ERROR.
+         * Do NOT reset on timeouts — that corrupts the DATA0/DATA1 toggle. */
+        if (status == STATUS_IO_DEVICE_ERROR || status == STATUS_SHARING_VIOLATION) {
+            WdfUsbTargetPipeResetSynchronously(Pipe, NULL, NULL);
+        }
     }
 
     if (BytesRead) *BytesRead = bytesTransferred;

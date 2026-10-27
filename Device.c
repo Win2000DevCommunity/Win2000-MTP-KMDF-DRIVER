@@ -29,6 +29,7 @@ MtpEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
     pnpPowerCallbacks.EvtDevicePrepareHardware = MtpEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = MtpEvtDeviceReleaseHardware;
+    pnpPowerCallbacks.EvtDeviceSurpriseRemoval = MtpEvtDeviceSurpriseRemoval;
     pnpPowerCallbacks.EvtDeviceD0Entry = MtpEvtDeviceD0Entry;
     pnpPowerCallbacks.EvtDeviceD0Exit = MtpEvtDeviceD0Exit;
 
@@ -134,6 +135,20 @@ MtpEvtIoDeviceControl(
         MtpGetTransferSpeed(Request);
         break;
 
+    case IOCTL_MTP_RESET_PIPES: {
+        /* User-mode detected consecutive timeout failures; reset both USB
+         * bulk pipes to recover from desynchronized pipe state. */
+        WDFDEVICE device = WdfRequestGetDevice(Request);
+        PDEVICE_CONTEXT ctx = DeviceGetContext(device);
+        if (ctx && ctx->UsbPresent) {
+            if (ctx->BulkInPipe) MtpUsb_ResetPipe(device, ctx->BulkInPipe);
+            if (ctx->BulkOutPipe) MtpUsb_ResetPipe(device, ctx->BulkOutPipe);
+            KdPrint(("MTP: Pipes reset via IOCTL request\n"));
+        }
+        WdfRequestComplete(Request, STATUS_SUCCESS);
+        break;
+    }
+
     default:
         WdfRequestComplete(Request, STATUS_NOT_SUPPORTED);
         break;
@@ -152,7 +167,7 @@ MtpGetTransferSpeed(WDFREQUEST Request)
 
     device = WdfRequestGetDevice(Request);
     ctx = DeviceGetContext(device);
-    if (!ctx) {
+    if (!ctx || !ctx->UsbPresent) {
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE);
         return STATUS_INVALID_DEVICE_STATE;
     }
@@ -281,3 +296,18 @@ MtpEvtDeviceD0Exit(
     KdPrint(("MTP: D0Exit completed\n"));
     return STATUS_SUCCESS;
 }
+
+VOID
+MtpEvtDeviceSurpriseRemoval(
+    IN WDFDEVICE Device
+    )
+{
+    PDEVICE_CONTEXT ctx;
+    KdPrint(("MTP: SurpriseRemoval called\n"));
+    ctx = DeviceGetContext(Device);
+    if (ctx) {
+        ctx->UsbPresent = FALSE;
+    }
+    MtpResetStreaming();
+}
+

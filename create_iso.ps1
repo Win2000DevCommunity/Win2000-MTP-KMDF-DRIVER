@@ -24,8 +24,10 @@ Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f
 Write-Host "Copying test tools and utilities..."
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\test_app\mtp_test.exe" "$stagingDir\TEST\"
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\user_app\mtp_gui.exe" "$stagingDir\TEST\"
+Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\user_app\mtp_gui_debug.exe" "$stagingDir\TEST\"
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\user_app\mtp_transfer.exe" "$stagingDir\TEST\"
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\user_app\mtp_gui.exe" "$stagingDir\"
+Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\user_app\mtp_gui_debug.exe" "$stagingDir\"
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\Release\MTP_DRIVE.REG" "$stagingDir\"
 Copy-Item "D:\Users\win2000\Downloads\WinDDK-1ed3987db6e72d1fb9c6298fddf0c080b8f591e1\3790.1830\tools\devcon\i386\devcon.exe" "$stagingDir\"
 Set-Content -Path "$stagingDir\open_mycomp.bat" -Value "@echo off`r`nstart explorer.exe ::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`r`n" -Encoding ASCII

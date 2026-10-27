@@ -41,6 +41,11 @@ NTSTATUS MtpUsb_Create(IN WDFDEVICE Device, IN OPTIONAL PMTP_USB_CONFIG Config);
 NTSTATUS MtpUsb_StartReaders(IN WDFDEVICE Device);
 NTSTATUS MtpUsb_StopReaders(IN WDFDEVICE Device);
 NTSTATUS MtpUsb_WriteBulk(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe, IN PVOID Buffer, IN size_t Length);
+/* Abort pending I/O and reset a USB pipe to clear stale data after timeout/error. */
+NTSTATUS MtpUsb_ResetPipe(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe);
+/* Send a zero-length bulk packet (needed to terminate an MTP data phase whose
+ * total length is an exact multiple of the endpoint max-packet size). */
+NTSTATUS MtpUsb_WriteZlp(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe);
 NTSTATUS MtpUsb_ReadBulk(IN WDFDEVICE Device, IN WDFUSBPIPE Pipe, IN PVOID Buffer, IN size_t BufferLength, OUT PULONG BytesRead);
 
 // Continuouse reader callback
