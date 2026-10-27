@@ -200,6 +200,226 @@ MtpGetTransferSpeed(WDFREQUEST Request)
     return STATUS_SUCCESS;
 }
 
+/*
+ * ============================================================================
+ * Shell Integration: Dynamic "Portable Device" My Computer NameSpace Icon
+ *
+ * Windows 2000 Explorer displays shell namespace extensions listed under:
+ *   HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace
+ *
+ * The icon is registered dynamically when the driver prepares hardware
+ * (device plugged in / loaded) and deleted when the driver releases hardware
+ * or encounters surprise removal (device unplugged / unloaded).
+ * ============================================================================
+ */
+
+#define MTP_GUID_STR L"{E0C30E66-2679-4594-817D-38F75FEF30A1}"
+#define MTP_DEVICE_NAME L"Portable Device (Android Smartphone)"
+#define MTP_INFOTIP L"Device: Portable Android Device\nFile System: MTP (Media Transfer Protocol)\nStatus: Ready for connection"
+
+static NTSTATUS
+MtpSetRegistryStringValue(
+    IN PCWSTR KeyPath,
+    IN PCWSTR ValueName OPTIONAL,
+    IN PCWSTR ValueData,
+    IN ULONG ValueType
+    )
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING keyStr;
+    UNICODE_STRING valStr;
+    UNICODE_STRING dataStr;
+    HANDLE hKey = NULL;
+    ULONG disposition = 0;
+
+    PAGED_CODE();
+
+    RtlInitUnicodeString(&keyStr, KeyPath);
+    InitializeObjectAttributes(&objAttr, &keyStr, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateKey(&hKey,
+                         KEY_ALL_ACCESS,
+                         &objAttr,
+                         0,
+                         NULL,
+                         REG_OPTION_NON_VOLATILE,
+                         &disposition);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: ZwCreateKey failed 0x%08x for %ws\n", status, KeyPath));
+        return status;
+    }
+
+    if (ValueName) {
+        RtlInitUnicodeString(&valStr, ValueName);
+    } else {
+        RtlInitUnicodeString(&valStr, L"");
+    }
+
+    RtlInitUnicodeString(&dataStr, ValueData);
+    status = ZwSetValueKey(hKey,
+                           &valStr,
+                           0,
+                           ValueType,
+                           dataStr.Buffer,
+                           dataStr.Length + sizeof(WCHAR));
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("MTP: ZwSetValueKey failed 0x%08x for %ws\n", status, KeyPath));
+    }
+
+    ZwClose(hKey);
+    return status;
+}
+
+static NTSTATUS
+MtpSetRegistryDwordValue(
+    IN PCWSTR KeyPath,
+    IN PCWSTR ValueName,
+    IN ULONG ValueData
+    )
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING keyStr;
+    UNICODE_STRING valStr;
+    HANDLE hKey = NULL;
+    ULONG disposition = 0;
+
+    PAGED_CODE();
+
+    RtlInitUnicodeString(&keyStr, KeyPath);
+    InitializeObjectAttributes(&objAttr, &keyStr, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateKey(&hKey,
+                         KEY_ALL_ACCESS,
+                         &objAttr,
+                         0,
+                         NULL,
+                         REG_OPTION_NON_VOLATILE,
+                         &disposition);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&valStr, ValueName);
+    status = ZwSetValueKey(hKey,
+                           &valStr,
+                           0,
+                           REG_DWORD,
+                           &ValueData,
+                           sizeof(ULONG));
+
+    ZwClose(hKey);
+    return status;
+}
+
+NTSTATUS
+MtpRegisterMyComputerIcon(VOID)
+{
+    NTSTATUS status;
+
+    PAGED_CODE();
+    KdPrint(("MTP: Registering Portable Device icon in My Computer...\n"));
+
+    /* 1. Base CLSID definition in HKLM\SOFTWARE\Classes\CLSID\{...} */
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR,
+        NULL,
+        MTP_DEVICE_NAME,
+        REG_SZ);
+
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR,
+        L"LocalizedString",
+        MTP_DEVICE_NAME,
+        REG_SZ);
+
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR,
+        L"InfoTip",
+        MTP_INFOTIP,
+        REG_SZ);
+
+    /* 2. DefaultIcon (Windows 2000 digital camera icon from sticpl.cpl) */
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR L"\\DefaultIcon",
+        NULL,
+        L"%SystemRoot%\\System32\\sticpl.cpl,1",
+        REG_EXPAND_SZ);
+
+    /* 3. ShellFolder attributes */
+    MtpSetRegistryDwordValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR L"\\ShellFolder",
+        L"Attributes",
+        0);
+
+    /* 4. Shell verbs */
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR L"\\Shell",
+        NULL,
+        L"Open",
+        REG_SZ);
+
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR L"\\Shell\\Open",
+        NULL,
+        L"&Open",
+        REG_SZ);
+
+    /* 5. Shell Open command: launches mtp_gui.exe */
+    MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\" MTP_GUID_STR L"\\Shell\\Open\\Command",
+        NULL,
+        L"\"%SystemRoot%\\System32\\mtp_gui.exe\"",
+        REG_EXPAND_SZ);
+
+    /* 6. NameSpace extension under My Computer - makes the icon appear! */
+    status = MtpSetRegistryStringValue(
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\" MTP_GUID_STR,
+        NULL,
+        MTP_DEVICE_NAME,
+        REG_SZ);
+
+    if (NT_SUCCESS(status)) {
+        KdPrint(("MTP: Successfully registered Portable Device in My Computer NameSpace\n"));
+    } else {
+        KdPrint(("MTP: Failed to register NameSpace extension: 0x%08x\n", status));
+    }
+
+    return status;
+}
+
+NTSTATUS
+MtpUnregisterMyComputerIcon(VOID)
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING keyStr;
+    HANDLE hKey = NULL;
+
+    PAGED_CODE();
+    KdPrint(("MTP: Unregistering Portable Device icon from My Computer...\n"));
+
+    /*
+     * Only delete the NameSpace key under MyComputer!
+     * Keep the CLSID definition intact so COM/Shell class registration
+     * remains valid for future device insertions.
+     */
+    RtlInitUnicodeString(&keyStr,
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\" MTP_GUID_STR);
+    InitializeObjectAttributes(&objAttr, &keyStr, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwOpenKey(&hKey, DELETE, &objAttr);
+    if (NT_SUCCESS(status)) {
+        status = ZwDeleteKey(hKey);
+        ZwClose(hKey);
+        KdPrint(("MTP: Successfully removed Portable Device NameSpace key (0x%08x)\n", status));
+    } else {
+        KdPrint(("MTP: NameSpace key not present or ZwOpenKey returned 0x%08x\n", status));
+    }
+
+    return status;
+}
 
 NTSTATUS
 MtpEvtDevicePrepareHardware(
@@ -221,6 +441,12 @@ MtpEvtDevicePrepareHardware(
         return status;
     }
 
+    /*
+     * Hardware is prepared and MTP device is ready.
+     * Register "Portable Device" icon in My Computer NameSpace so it appears immediately!
+     */
+    MtpRegisterMyComputerIcon();
+
     return STATUS_SUCCESS;
 }
 
@@ -233,6 +459,12 @@ MtpEvtDeviceReleaseHardware(
     NTSTATUS status;
     
     UNREFERENCED_PARAMETER(ResourcesTranslated);
+
+    /*
+     * Hardware is released (device unplugged or driver stopping).
+     * Remove "Portable Device" icon from My Computer NameSpace.
+     */
+    MtpUnregisterMyComputerIcon();
 
     // Stop USB readers
     status = MtpUsb_StopReaders(Device);
@@ -304,6 +536,12 @@ MtpEvtDeviceSurpriseRemoval(
 {
     PDEVICE_CONTEXT ctx;
     KdPrint(("MTP: SurpriseRemoval called\n"));
+
+    /*
+     * Immediate surprise removal: remove icon from My Computer right away.
+     */
+    MtpUnregisterMyComputerIcon();
+
     ctx = DeviceGetContext(Device);
     if (ctx) {
         ctx->UsbPresent = FALSE;

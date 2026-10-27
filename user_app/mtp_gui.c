@@ -1065,10 +1065,13 @@ void HandleDeviceRemoval(HWND hWnd)
         g_hEnumThread = NULL;
     }
 
-    /* 2. Disconnect device (removes icon from My Computer) */
+    /* 2. Disconnect device session */
     DisconnectDevice();
 
-    /* 3. Show notification balloon */
+    /* 3. Physical hardware removed: ensure icon is removed from My Computer and notify Explorer */
+    UnregisterPortableDeviceCLSID();
+
+    /* 4. Show notification balloon */
     {
         char msg[256];
         _snprintf(msg, sizeof(msg), "%s was removed from the computer. Reconnect the cable to continue.", devName);
@@ -1137,9 +1140,6 @@ void DisconnectDevice(void)
     /* Taskbar notification: Secure Deload */
     ShowTaskbarNotification(g_hMainWnd, "Safe to Remove Hardware",
         "The 'MTP Portable Device' can now be safely removed from the computer.", NIIF_INFO);
-
-    /* Remove portable device icon from My Computer when device is disconnected */
-    UnregisterPortableDeviceCLSID();
 }
 
 DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam)
@@ -5463,18 +5463,11 @@ void RegisterPortableDeviceCLSID(void)
         RegCloseKey(hKey);
     }
 
-    /* 7. Register in MyComputer\\NameSpace in HKLM */
-    if (RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\NameSpace\\{E0C30E66-2679-4594-817D-38F75FEF30A1}",
-        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        const char *szName = g_szRootName[0] ? g_szRootName : "Portable Device (Android Smartphone)";
-        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)szName, (DWORD)strlen(szName) + 1);
-        RegCloseKey(hKey);
-    }
-
-    /* 8. Notify Explorer shell to refresh My Computer so icon appears immediately */
-    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSHNOWAIT, "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", NULL);
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
+    /*
+     * NOTE: The MyComputer\NameSpace key is NOT registered here!
+     * The My Computer icon is exclusively controlled by the kernel driver (mtp.sys)
+     * upon hardware prepare (plug-in) and release (unplug).
+     */
 }
 
 void UnregisterPortableDeviceCLSID(void)

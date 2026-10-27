@@ -4,8 +4,11 @@ Windows Registry Editor Version 5.00
 ; Register "Portable Device" inside the Windows 2000 "My Computer" folder
 ; ==============================================================================
 
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{E0C30E66-2679-4594-817D-38F75FEF30A1}]
-@="Portable Device (Android Smartphone)"
+; Note: The NameSpace entry under MyComputer is dynamically created by the
+; MTP kernel driver (mtp.sys) when the hardware loads/attaches, and removed
+; when the hardware unloads/detaches.
+; [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{E0C30E66-2679-4594-817D-38F75FEF30A1}]
+; @="Portable Device (Android Smartphone)"
 
 [HKEY_CLASSES_ROOT\CLSID\{E0C30E66-2679-4594-817D-38F75FEF30A1}]
 @="Portable Device (Android Smartphone)"
