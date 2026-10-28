@@ -38,6 +38,7 @@ x64/
 Release/
 *.zip
 *.iso
+*.ps1
 
 # --- QEMU / VM test artifacts ---
 *.img
