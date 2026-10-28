@@ -1,39 +1,34 @@
-# MTP File Transfer Application for Windows 2000
+# Windows 2000 MTP Application Suite
 
-This is a user-mode application that communicates with the MTP KMDF driver
-to browse and transfer files between a Windows 2000 PC and MTP devices
-(smartphones, digital cameras, etc.).
+This directory contains the user-mode software suite that communicates with the MTP KMDF driver (`mtp.sys`) to browse, preview, and transfer files between a Windows 2000 PC and MTP/PTP devices (smartphones, digital cameras, media players).
 
-## Features
+## Applications
 
-- **Interactive Mode**: Menu-driven interface for browsing and file transfer
-- **Command-Line Mode**: Scriptable commands for automation
-- **Device Info**: Retrieve MTP device information
-- **Storage Listing**: List available storage volumes on the device
-- **Object Browsing**: List files and folders on the device
-- **File Download**: Transfer files from device to PC
-- **File Upload**: Transfer files from PC to device
+### 1. `mtp_gui.exe` — Windows 2000 Explorer MTP File Manager
+- Authentic Windows 2000 Explorer user interface with Web View sidebar, Address bar, and Standard Buttons toolbar.
+- **5 View Modes:** Thumbnails (96x96), Large Icons (32x32), Small Icons (16x16), List, Details.
+- **Virtualized Pagination:** Smoothly browse directories with 10,000+ items using 30-item pages and navigation bar (`|<`, `<`, `Page X of Y`, `>`, `>|`).
+- **Dual-Engine Real Thumbnail Loader:**
+  - PTP `0x100A (GetThumb)` for fast (~15 ms) hardware thumbnails directly from digital cameras.
+  - MTP `0x9107 (GetPartialObject)` EXIF header extraction fallback for smartphones.
+  - In-memory RAM bitmap cache for 0 ms redisplay.
+- **Interactive Sorting:** Sort by Name, Size, Type, or Date Modified with Ascending/Descending toggles and visual arrow indicators (`▲`/`▼`) in Details columns.
+- **Built-in Search Engine (<kbd>F3</kbd> / <kbd>Ctrl+F</kbd>):** Fast multi-threaded recursive breadth-first traversal with wildcard matching and file category filters.
+
+### 2. `mtp_gui_debug.exe` — Diagnostics GUI with Attached Live Console
+- Compiles `mtp_gui.c` with `/DMTP_DEBUG_CONSOLE=1`.
+- Spawns an attached live command console tracking every MTP transaction opcode name, execution latency (in ms), payload byte count, and Win32 / USB status codes.
+
+### 3. `mtp_transfer.exe` — CLI File Transfer & Automation Tool
+- Scriptable console utility for batch file download, upload, listing, and deletion.
 
 ## Building
 
-### Prerequisites
-
-1. Windows 2000 SDK (included in workspace at `2000 sdk` folder)
-2. Visual C++ 6.0 or compatible compiler
-3. Run from DDK/SDK command prompt with environment set up
-
-### Compilation
-
+Run from the `user_app` directory:
 ```batch
-cd user_app
-build.bat
+build_gui_w2k.bat
 ```
-
-Or manually compile:
-
-```batch
-cl /O2 /W3 /D_WIN32_WINNT=0x0500 mtp_transfer.c /link kernel32.lib user32.lib
-```
+This builds `mtp_gui.exe`, `mtp_gui_debug.exe`, and `mtp_transfer.exe` using the Windows 2000 Platform SDK and DDK runtime libraries, automatically copying all binaries to `..\Release\`.
 
 ## Usage
 
