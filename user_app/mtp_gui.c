@@ -61,6 +61,7 @@
 #define IDM_EDIT_SELECT_ALL    210
 #define IDM_EDIT_INVERT_SEL    211
 
+#define IDM_VIEW_THUMBNAILS    228
 #define IDM_VIEW_LARGE_ICONS   220
 #define IDM_VIEW_SMALL_ICONS   221
 #define IDM_VIEW_LIST          222
@@ -69,6 +70,8 @@
 #define IDM_VIEW_TOOLBAR_STD   225
 #define IDM_VIEW_TOOLBAR_ADDR  226
 #define IDM_VIEW_STATUSBAR     227
+
+#define VIEW_MODE_THUMBNAILS   0x1000
 #define IDM_VIEW_SORT_NAME        260
 #define IDM_VIEW_SORT_SIZE        261
 #define IDM_VIEW_SORT_TYPE        262
@@ -166,9 +169,12 @@
 #define MTP_OP_GET_STORAGE_INFO      0x1005
 #define MTP_OP_GET_OBJECT_HANDLES    0x1007
 #define MTP_OP_GET_OBJECT_INFO       0x1008
+#define MTP_OP_GET_THUMB             0x100A
 #define MTP_OP_DELETE_OBJECT         0x100B
 #define MTP_OP_SEND_OBJECT_INFO      0x100C
 #define MTP_OP_SEND_OBJECT           0x100D
+#define MTP_OP_GET_PARTIAL_OBJECT    0x9107
+#define MTP_OP_GET_PARTIAL_OBJECT_64 0x9807
 
 /* MTP Format Codes */
 #define MTP_FORMAT_UNDEFINED         0x3000
@@ -219,10 +225,14 @@ typedef struct _OBJECT_ITEM {
     ULONGLONG  Size;         /* 64-bit: supports files up to 18 Exabytes */
     DWORD      SizeLow;     /* low 32 bits from MTP ObjectInfo */
     DWORD      SizeHigh;    /* high 32 bits (from MTP property 0xDC03 if available) */
+    WORD       ThumbFormat; /* from MTP ObjectInfo offset 12 */
+    DWORD      ThumbSize;   /* from MTP ObjectInfo offset 14 (compressed thumbnail size) */
     WCHAR      Name[256];
     char       DateStr[32];
     FILETIME   FileTime;
     BOOL       IsFolder;
+    int        ThumbIconIndex; /* -1 if no 32x32 thumbnail generated yet, >= 0 for custom thumbnail in g_hLargeImageList */
+    int        BigThumbIconIndex; /* -1 if no 96x96 thumbnail generated yet, >= 0 for custom thumbnail in g_hThumbImageList */
 } OBJECT_ITEM;
 
 /* ============================================================================
@@ -241,6 +251,7 @@ static HWND g_hStatusBar = NULL;
 
 static HIMAGELIST g_hLargeImageList = NULL;
 static HIMAGELIST g_hSmallImageList = NULL;
+static HIMAGELIST g_hThumbImageList = NULL;
 
 static HANDLE g_hDevice = INVALID_HANDLE_VALUE;
 static DWORD g_SessionId = 0;
@@ -287,8 +298,10 @@ static int g_NavHistoryCount = 0;
 #define WM_TRAY_NOTIFY         (WM_APP + 50)
 #define TIMER_TRAY_DISMISS     2001
 #define TIMER_DEVICE_CHECK     2002
-#define TIMER_PREVIEW_DEBOUNCE 2003
-#define WM_USER_PREVIEW_READY  (WM_USER + 101)
+#define TIMER_PREVIEW_DEBOUNCE      2003
+#define TIMER_THUMB_SCROLL_DEBOUNCE 2004
+#define WM_USER_PREVIEW_READY       (WM_USER + 101)
+#define WM_USER_THUMB_READY         (WM_USER + 102)
 
 #define PREVIEW_BOX_W          126
 #define PREVIEW_BOX_H          91
@@ -321,6 +334,33 @@ static CRITICAL_SECTION g_PreviewCs;
 static DWORD g_CurrentPreviewHandle = 0;
 static HANDLE g_hPreviewThread = NULL;
 static LONG g_CancelPreview = 0;
+static HANDLE g_hThumbThread = NULL;
+static LONG g_CancelThumb = 0;
+static LONG g_ThumbEpoch = 0;  /* Incremented on every folder navigation/page change; stale results are discarded */
+/* 0x100A (GetThumb) is NOT used - causes USB endpoint stalls on MTP devices.
+ * All thumbnails are extracted via safe EXIF range reads (IOCTL_MTP_GET_OBJECT_PART). */
+
+/* Classic Windows 2000 Pagination Controls for Thumbnails Mode */
+#define IDC_PAGINATION_BAR          2050
+#define IDC_BTN_FIRST_PAGE          2051
+#define IDC_BTN_PREV_PAGE           2052
+#define IDC_STATIC_PAGE_INFO        2053
+#define IDC_BTN_NEXT_PAGE           2054
+#define IDC_BTN_LAST_PAGE           2055
+
+#define THUMB_PAGE_SIZE             30
+
+static HWND g_hPaginationBar = NULL;
+static HWND g_hBtnFirstPage = NULL;
+static HWND g_hBtnPrevPage = NULL;
+static HWND g_hStaticPageInfo = NULL;
+static HWND g_hBtnNextPage = NULL;
+static HWND g_hBtnLastPage = NULL;
+static WNDPROC g_pfnOldPaginationBarProc = NULL;
+
+static int  g_ThumbCurrentPage = 1;
+static int  g_ThumbTotalPages = 1;
+
 static const IID IID_IPicture_Local = { 0x7bf80980, 0xbf32, 0x101a, { 0x8b, 0xbb, 0x00, 0xaa, 0x00, 0x30, 0x0c, 0xab } };
 
 /* Explorer UI and Settings Options */
@@ -345,6 +385,12 @@ LRESULT CALLBACK WebViewWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK ListViewSubclassProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK AddressBandSubclassProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK AddressEditSubclassProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK PaginationBarSubclassProc(HWND, UINT, WPARAM, LPARAM);
+static void CreatePaginationBar(HWND hWnd);
+static void UpdatePaginationControls(int currentPage, int totalPages, DWORD totalCount);
+static void SetThumbPage(int newPage);
+static int  ListViewIndexToObjectIndex(int lvIndex);
+static int  ObjectIndexToListViewIndex(int objIndex);
 DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam);
 BOOL MtpGetObjectInfoWithRetry(DWORD handle, BYTE *infoBuf, DWORD infoBufSize, DWORD *infoBytes);
 void HandleDeviceRemoval(HWND hWnd);
@@ -397,6 +443,9 @@ static HBITMAP GetCachedPreview(DWORD handle);
 static void ClearPreviewCache(void);
 static BOOL IsImageObject(const OBJECT_ITEM *obj);
 static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam);
+static void ResetLargeImageListThumbs(void);
+static void StopThumbnailLoader(void);
+static void StartThumbnailLoader(void);
 
 static BOOL g_bDebugConsole = FALSE;
 
@@ -451,10 +500,12 @@ const char* GetMtpOpcodeName(WORD opcode)
         case 0x100B: return "DeleteObject";
         case 0x100C: return "SendObjectInfo";
         case 0x100D: return "SendObject";
+        case 0x9107: return "GetPartialObject";
         case 0x9801: return "GetObjectPropsSupported";
         case 0x9802: return "GetObjectPropDesc";
         case 0x9803: return "GetObjectPropValue";
         case 0x9805: return "GetObjectPropList";
+        case 0x9807: return "GetPartialObject64";
         default:     return "MTP_Opcode";
     }
 }
@@ -605,7 +656,9 @@ void SortObjectList(int column, BOOL toggle)
     }
     LeaveCriticalSection(&g_ObjectsCs);
 
-    if (g_hListView) {
+    if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+        SetThumbPage(1);
+    } else if (g_hListView) {
         InvalidateRect(g_hListView, NULL, TRUE);
         UpdateWindow(g_hListView);
     }
@@ -687,7 +740,11 @@ BOOL MtpSendOperation(WORD opcode, DWORD *params, DWORD paramCount,
         }
     }
 
-    free(inputBuffer);
+    {
+        DWORD dwSavedErr = result ? ERROR_SUCCESS : GetLastError();
+        free(inputBuffer);
+        if (!result) SetLastError(dwSavedErr);
+    }
     if (bytesReceived) *bytesReceived = bytesRet;
     return result;
 }
@@ -701,10 +758,36 @@ static void MtpResetPipes(void)
         EnterCriticalSection(&g_DeviceCs);
         DeviceIoControl(g_hDevice, IOCTL_MTP_RESET_PIPES,
                         NULL, 0, NULL, 0, &dummy, NULL);
+        LeaveCriticalSection(&g_DeviceCs);
+
         if (g_bDebugConsole) {
             DebugLog("[RECOVERY] USB pipes reset via IOCTL");
         }
-        LeaveCriticalSection(&g_DeviceCs);
+
+        /* Give the USB controller time to fully complete the endpoint reset.
+         * Without this delay, the next IOCTL races the hardware reset and
+         * hits a 15-second kernel semaphore timeout (err=121). */
+        Sleep(500);
+
+        /* Verification probe: confirm the device is responsive before
+         * allowing any other thread to issue commands. */
+        {
+            BYTE devBuf[256];
+            DWORD devRet = 0;
+            BOOL probeOk = MtpSendOperation(MTP_OP_GET_DEVICE_INFO, NULL, 0,
+                                            NULL, 0, devBuf, sizeof(devBuf), &devRet);
+            if (!probeOk) {
+                /* Device still not ready after 500ms; give it more time */
+                Sleep(500);
+                if (g_bDebugConsole) {
+                    DebugLog("[RECOVERY] Post-reset probe failed; extra 500ms delay applied");
+                }
+            } else {
+                if (g_bDebugConsole) {
+                    DebugLog("[RECOVERY] Post-reset probe OK; device responsive");
+                }
+            }
+        }
     }
 }
 
@@ -855,14 +938,22 @@ int GetIconIndexForFormat(WORD format, BOOL isFolder)
     switch (format) {
         case MTP_FORMAT_TEXT:        return 1;
         case MTP_FORMAT_EXIF_JPEG:
-        case MTP_FORMAT_BMP:
-        case MTP_FORMAT_PNG:         return 2;
+        case 0x3808: /* MTP_FORMAT_JFIF */
+        case 0x3807: /* MTP_FORMAT_GIF */
+        case 0x380B: /* MTP_FORMAT_PNG */
+        case 0x3802: /* MTP_FORMAT_TIFF_EP */
+        case 0x380D: /* MTP_FORMAT_TIFF */
+        case MTP_FORMAT_BMP:         return 2;
         case MTP_FORMAT_MP3:
-        case MTP_FORMAT_WMA:         return 3;
+        case MTP_FORMAT_WMA:
+        case 0xB902: /* MTP_FORMAT_OGG */
+        case 0xB903: /* MTP_FORMAT_AAC */       return 3;
         case MTP_FORMAT_AVI:
         case MTP_FORMAT_MPEG:
         case MTP_FORMAT_MP4_CONTAINER:
-        case MTP_FORMAT_WMV:         return 4;
+        case MTP_FORMAT_WMV:
+        case 0x300C: /* MTP_FORMAT_ASF */
+        case 0xB984: /* MTP_FORMAT_3GP_CONTAINER */ return 4;
         default:                     return 5;
     }
 }
@@ -1150,6 +1241,8 @@ void DisconnectDevice(void)
     g_Connected = FALSE;
     g_SessionId = 0;
     g_CurrentParent = 0;
+    g_ThumbCurrentPage = 1;
+    StopThumbnailLoader();
     
     EnterCriticalSection(&g_ObjectsCs);
     if (g_Objects) {
@@ -1206,7 +1299,15 @@ DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam)
 
     if (!MtpSendOperation(MTP_OP_GET_OBJECT_HANDLES, params, 3, NULL, 0,
                           buffer, bufCap, &bytesReturned) || bytesReturned < sizeof(DWORD)) {
-        if (parentHandle == 0 && g_hDevice != INVALID_HANDLE_VALUE) {
+        /* If initial call failed, reset USB bulk pipes and retry once before falling back */
+        if (!g_CancelEnum && g_Connected) {
+            DebugLog("[RECOVERY] GetObjectHandles failed; resetting pipes and retrying...");
+            MtpResetPipes();
+            Sleep(100);
+            MtpSendOperation(MTP_OP_GET_OBJECT_HANDLES, params, 3, NULL, 0,
+                             buffer, bufCap, &bytesReturned);
+        }
+        if (bytesReturned < sizeof(DWORD) && parentHandle == 0 && g_hDevice != INVALID_HANDLE_VALUE) {
             EnterCriticalSection(&g_DeviceCs);
             DeviceIoControl(g_hDevice, IOCTL_MTP_LIST_OBJECTS, NULL, 0,
                             buffer, bufCap, &bytesReturned, NULL);
@@ -1243,6 +1344,10 @@ DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam)
         return 0;
     }
     ZeroMemory(objArray, handleCount * sizeof(OBJECT_ITEM));
+    for (i = 0; i < handleCount; i++) {
+        objArray[i].ThumbIconIndex = -1;
+        objArray[i].BigThumbIconIndex = -1;
+    }
 
     EnterCriticalSection(&g_ObjectsCs);
     if (g_Objects) free(g_Objects);
@@ -1287,6 +1392,8 @@ DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam)
                 objArray[i].SizeLow = *((DWORD*)(infoBuf + 8));
                 objArray[i].SizeHigh = 0;
                 objArray[i].Size = (ULONGLONG)objArray[i].SizeLow;
+                objArray[i].ThumbFormat = (infoBytes >= 14) ? *((WORD*)(infoBuf + 12)) : 0;
+                objArray[i].ThumbSize = (infoBytes >= 18) ? *((DWORD*)(infoBuf + 14)) : 0;
                 objArray[i].ParentHandle = *((DWORD*)(infoBuf + 38));
 
                 pNext = ReadMtpString(infoBuf + 52, infoBytes - 52, objArray[i].Name, 256);
@@ -1305,6 +1412,13 @@ DWORD WINAPI EnumObjectsWorkerThread(LPVOID lpParam)
                 }
                 ParseMtpDate(dateW, objArray[i].DateStr, sizeof(objArray[i].DateStr), &objArray[i].FileTime);
                 objArray[i].IsFolder = (objArray[i].Format == MTP_FORMAT_ASSOCIATION);
+                if (objArray[i].Name[0] == L'\0') {
+                    if (objArray[i].IsFolder) {
+                        _snwprintf(objArray[i].Name, 256, L"Folder_%08X", handles[i]);
+                    } else {
+                        _snwprintf(objArray[i].Name, 256, L"Object_%08X", handles[i]);
+                    }
+                }
 
                 /* 64-bit file size if low is 0xFFFFFFFF */
                 if (!objArray[i].IsFolder && objArray[i].SizeLow == 0xFFFFFFFF) {
@@ -1379,10 +1493,14 @@ BOOL RefreshObjects(void)
 
     InterlockedExchange(&g_CancelEnum, 0);
 
-    /* Cancel any active preview worker */
+    /* Cancel any active preview worker and reset thumbnail loader */
     InterlockedExchange(&g_CancelPreview, 1);
-    if (g_hMainWnd) KillTimer(g_hMainWnd, TIMER_PREVIEW_DEBOUNCE);
+    if (g_hMainWnd) {
+        KillTimer(g_hMainWnd, TIMER_PREVIEW_DEBOUNCE);
+        KillTimer(g_hMainWnd, TIMER_THUMB_SCROLL_DEBOUNCE);
+    }
     g_CurrentPreviewHandle = 0;
+    ResetLargeImageListThumbs();
 
     /* Clear listview items immediately */
     EnterCriticalSection(&g_ObjectsCs);
@@ -1479,22 +1597,48 @@ void UpdateNavButtons(void)
 
 void NavigateToFolder(DWORD handle, const char *folderName)
 {
+    char realFolderName[256];
+
     if (g_bSearchRunning) return;
     g_CurrentParent = handle;
+
+    realFolderName[0] = '\0';
     if (folderName && folderName[0]) {
+        strncpy(realFolderName, folderName, sizeof(realFolderName) - 1);
+        realFolderName[sizeof(realFolderName) - 1] = '\0';
+    } else if (handle != 0 && handle != MTP_PARENT_ROOT) {
+        BYTE infoBuf[1024];
+        DWORD infoBytes = 0;
+        WCHAR nameW[256];
+        nameW[0] = L'\0';
+        if (MtpGetObjectInfoWithRetry(handle, infoBuf, sizeof(infoBuf), &infoBytes) && infoBytes >= 53) {
+            ReadMtpString(infoBuf + 52, infoBytes - 52, nameW, 256);
+            WideCharToMultiByte(CP_ACP, 0, nameW, -1, realFolderName, sizeof(realFolderName), NULL, NULL);
+        }
+        if (realFolderName[0] == '\0') {
+            _snprintf(realFolderName, sizeof(realFolderName), "Folder_%08X", handle);
+        }
+    }
+
+    if (realFolderName[0]) {
         if (strcmp(g_szCurrentPath, g_szRootName) == 0) {
-            _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\%s", g_szRootName, folderName);
+            _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\%s", g_szRootName, realFolderName);
         } else {
             size_t currLen = strlen(g_szCurrentPath);
-            size_t fnLen = strlen(folderName);
-            if (currLen >= fnLen && _stricmp(g_szCurrentPath + currLen - fnLen, folderName) == 0) {
-                /* already ends with folderName */
+            size_t fnLen = strlen(realFolderName);
+            if (currLen >= fnLen && _stricmp(g_szCurrentPath + currLen - fnLen, realFolderName) == 0) {
+                /* already ends with realFolderName */
             } else {
-                _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\%s", g_szCurrentPath, folderName);
+                _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\%s", g_szCurrentPath, realFolderName);
             }
         }
     } else {
-        _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\Subfolder", g_szRootName);
+        if (handle == 0 || handle == MTP_PARENT_ROOT) {
+            strncpy(g_szCurrentPath, g_szRootName, sizeof(g_szCurrentPath) - 1);
+            g_szCurrentPath[sizeof(g_szCurrentPath) - 1] = '\0';
+        } else {
+            _snprintf(g_szCurrentPath, sizeof(g_szCurrentPath), "%s\\Folder_%08X", g_szRootName, handle);
+        }
     }
     if (g_hAddressCombo) {
         SetWindowTextA(g_hAddressCombo, g_szCurrentPath);
@@ -1931,6 +2075,7 @@ BOOL DownloadObjectToFile(HWND hWnd, DWORD handle, ULONGLONG totalSize, const ch
 BOOL DownloadSelected(HWND hWnd)
 {
     int selIndex;
+    int objIdx;
     DWORD handle = 0;
     ULONGLONG size = 0;
     char szFile[MAX_PATH];
@@ -1950,12 +2095,13 @@ BOOL DownloadSelected(HWND hWnd)
         return FALSE;
     }
     
+    objIdx = ListViewIndexToObjectIndex(selIndex);
     EnterCriticalSection(&g_ObjectsCs);
-    if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-        handle = g_Objects[selIndex].Handle;
-        size = g_Objects[selIndex].Size;
-        isFolder = g_Objects[selIndex].IsFolder;
-        WideCharToMultiByte(CP_ACP, 0, g_Objects[selIndex].Name, -1, nameA, sizeof(nameA), NULL, NULL);
+    if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+        handle = g_Objects[objIdx].Handle;
+        size = g_Objects[objIdx].Size;
+        isFolder = g_Objects[objIdx].IsFolder;
+        WideCharToMultiByte(CP_ACP, 0, g_Objects[objIdx].Name, -1, nameA, sizeof(nameA), NULL, NULL);
         valid = TRUE;
     }
     LeaveCriticalSection(&g_ObjectsCs);
@@ -1984,6 +2130,7 @@ BOOL DownloadSelected(HWND hWnd)
 BOOL CopySelectedToClipboard(HWND hWnd)
 {
     int selIndex = -1;
+    int objIdx = -1;
     char szTempBase[MAX_PATH];
     char szTempFile[MAX_PATH];
     char statusBuf[256];
@@ -2004,9 +2151,10 @@ BOOL CopySelectedToClipboard(HWND hWnd)
     
     EnterCriticalSection(&g_ObjectsCs);
     while ((selIndex = ListView_GetNextItem(g_hListView, selIndex, LVNI_SELECTED)) != -1) {
-        if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-            if (!g_Objects[selIndex].IsFolder && selectedCount < 64) {
-                selectedItems[selectedCount++] = g_Objects[selIndex];
+        objIdx = ListViewIndexToObjectIndex(selIndex);
+        if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+            if (!g_Objects[objIdx].IsFolder && selectedCount < 64) {
+                selectedItems[selectedCount++] = g_Objects[objIdx];
             }
         }
     }
@@ -2438,6 +2586,7 @@ BOOL UploadFile(HWND hWnd)
 BOOL DeleteSelected(HWND hWnd)
 {
     int selIndex;
+    int objIdx;
     DWORD handle;
     BYTE response[256];
     DWORD bytesReceived;
@@ -2458,9 +2607,10 @@ BOOL DeleteSelected(HWND hWnd)
         return FALSE;
     }
     
+    objIdx = ListViewIndexToObjectIndex(selIndex);
     EnterCriticalSection(&g_ObjectsCs);
-    if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-        handle = g_Objects[selIndex].Handle;
+    if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+        handle = g_Objects[objIdx].Handle;
     } else {
         LeaveCriticalSection(&g_ObjectsCs);
         return FALSE;
@@ -2655,19 +2805,255 @@ static void ClearPreviewCache(void)
     LeaveCriticalSection(&g_PreviewCs);
 }
 
+static const BYTE* FindImageStart(const BYTE *pData, DWORD dwSize, DWORD *pActualSize)
+{
+    DWORD i;
+    if (!pData || dwSize < 8) {
+        if (pActualSize) *pActualSize = dwSize;
+        return pData;
+    }
+
+    for (i = 0; i < 64 && (i + 4) <= dwSize; i++) {
+        /* JPEG: FF D8 FF */
+        if (pData[i] == 0xFF && pData[i+1] == 0xD8 && pData[i+2] == 0xFF) {
+            if (pActualSize) *pActualSize = dwSize - i;
+            return pData + i;
+        }
+        /* BMP: BM */
+        if (pData[i] == 'B' && pData[i+1] == 'M') {
+            if (pActualSize) *pActualSize = dwSize - i;
+            return pData + i;
+        }
+        /* GIF: GIF8 */
+        if (pData[i] == 'G' && pData[i+1] == 'I' && pData[i+2] == 'F' && pData[i+3] == '8') {
+            if (pActualSize) *pActualSize = dwSize - i;
+            return pData + i;
+        }
+    }
+
+    if (pActualSize) *pActualSize = dwSize;
+    return pData;
+}
+
+static BOOL FindExifThumbnail(const BYTE *pData, DWORD dwSize, DWORD *pThumbOff, DWORD *pThumbLen)
+{
+    DWORD pos;
+    if (!pData || dwSize < 64) return FALSE;
+
+    /* JPEG SOI marker */
+    if (pData[0] != 0xFF || pData[1] != 0xD8) return FALSE;
+    pos = 2;
+
+    while (pos + 4 < dwSize) {
+        WORD marker;
+        DWORD len;
+
+        if (pData[pos] != 0xFF) break;
+        marker = pData[pos + 1];
+
+        /* Skip fill bytes */
+        if (marker == 0xFF) {
+            pos++;
+            continue;
+        }
+
+        /* Standalone markers */
+        if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) {
+            pos += 2;
+            continue;
+        }
+
+        len = ((DWORD)pData[pos + 2] << 8) | pData[pos + 3];
+        if (len < 2 || (pos + 2 + len) > dwSize) break;
+
+        /* APP1 marker (0xFF, 0xE1) */
+        if (marker == 0xE1) {
+            if ((pos + 10) <= dwSize &&
+                pData[pos + 4] == 'E' && pData[pos + 5] == 'x' &&
+                pData[pos + 6] == 'i' && pData[pos + 7] == 'f' &&
+                pData[pos + 8] == 0 && pData[pos + 9] == 0) {
+                
+                DWORD scanStart = pos + 14;
+                DWORD scanEnd = pos + 2 + len;
+                DWORD t, e;
+
+                for (t = scanStart; (t + 4) < scanEnd; t++) {
+                    if (pData[t] == 0xFF && pData[t + 1] == 0xD8 && pData[t + 2] == 0xFF) {
+                        for (e = t + 4; (e + 1) < scanEnd; e++) {
+                            if (pData[e] == 0xFF && pData[e + 1] == 0xD9) {
+                                DWORD thumbLength = (e - t) + 2;
+                                if (thumbLength >= 256) {
+                                    if (pThumbOff) *pThumbOff = t;
+                                    if (pThumbLen) *pThumbLen = thumbLength;
+                                    return TRUE;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        pos += 2 + len;
+    }
+
+    return FALSE;
+}
+
+static HBITMAP ScaleBitmapToSize(HBITMAP hSrc, int targetSize)
+{
+    HDC hdcScreen;
+    HDC hdcSrc;
+    HDC hdcDst;
+    HBITMAP hDst;
+    HBITMAP hOldSrc;
+    HBITMAP hOldDst;
+    BITMAP bm;
+    int maxW, maxH;
+    int dstW, dstH, posX, posY;
+    RECT rc;
+
+    if (!hSrc || targetSize <= 0) return NULL;
+    if (!GetObject(hSrc, sizeof(bm), &bm)) return NULL;
+    if (bm.bmWidth <= 0 || bm.bmHeight <= 0) return NULL;
+
+    hdcScreen = GetDC(NULL);
+    if (!hdcScreen) return NULL;
+
+    hdcSrc = CreateCompatibleDC(hdcScreen);
+    hdcDst = CreateCompatibleDC(hdcScreen);
+    hDst = CreateCompatibleBitmap(hdcScreen, targetSize, targetSize);
+
+    if (hdcSrc && hdcDst && hDst) {
+        hOldSrc = (HBITMAP)SelectObject(hdcSrc, hSrc);
+        hOldDst = (HBITMAP)SelectObject(hdcDst, hDst);
+
+        rc.left = 0; rc.top = 0; rc.right = targetSize; rc.bottom = targetSize;
+        FillRect(hdcDst, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+        if (targetSize > 48) {
+            maxW = targetSize - 12;
+            maxH = targetSize - 12;
+        } else {
+            maxW = targetSize;
+            maxH = targetSize;
+        }
+
+        if (bm.bmWidth * maxH >= bm.bmHeight * maxW) {
+            dstW = maxW;
+            dstH = MulDiv(maxW, bm.bmHeight, bm.bmWidth);
+            if (dstH < 1) dstH = 1;
+        } else {
+            dstH = maxH;
+            dstW = MulDiv(maxH, bm.bmWidth, bm.bmHeight);
+            if (dstW < 1) dstW = 1;
+        }
+        posX = (targetSize - dstW) / 2;
+        posY = (targetSize - dstH) / 2;
+
+        SetStretchBltMode(hdcDst, COLORONCOLOR);
+        StretchBlt(hdcDst, posX, posY, dstW, dstH,
+                   hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+
+        if (targetSize > 48) {
+            HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(160, 160, 160));
+            HPEN hOldPen = (HPEN)SelectObject(hdcDst, hBorderPen);
+            HBRUSH hOldBrush = (HBRUSH)SelectObject(hdcDst, GetStockObject(NULL_BRUSH));
+
+            Rectangle(hdcDst, posX - 1, posY - 1, posX + dstW + 1, posY + dstH + 1);
+
+            SetPixel(hdcDst, posX + dstW + 1, posY + dstH + 1, RGB(200, 200, 200));
+
+            SelectObject(hdcDst, hOldBrush);
+            SelectObject(hdcDst, hOldPen);
+            DeleteObject(hBorderPen);
+        }
+
+        SelectObject(hdcSrc, hOldSrc);
+        SelectObject(hdcDst, hOldDst);
+    }
+
+    if (hdcSrc) DeleteDC(hdcSrc);
+    if (hdcDst) DeleteDC(hdcDst);
+    ReleaseDC(NULL, hdcScreen);
+
+    return hDst;
+}
+
+static HBITMAP ScaleBitmapTo32(HBITMAP hSrc)
+{
+    return ScaleBitmapToSize(hSrc, 32);
+}
+
+static HBITMAP CreateThumbnailCardFromIcon(HICON hIcon)
+{
+    HDC hdcScreen;
+    HDC hdcMem;
+    HBITMAP hBmp;
+    HBITMAP hOldB;
+    RECT rc;
+    RECT rcCard;
+    HPEN hPen;
+    HPEN hOldP;
+    HBRUSH hBrush;
+    HBRUSH hOldBr;
+
+    hdcScreen = GetDC(NULL);
+    if (!hdcScreen) return NULL;
+
+    hdcMem = CreateCompatibleDC(hdcScreen);
+    hBmp = CreateCompatibleBitmap(hdcScreen, 96, 96);
+    if (hdcMem && hBmp) {
+        hOldB = (HBITMAP)SelectObject(hdcMem, hBmp);
+        rc.left = 0; rc.top = 0; rc.right = 96; rc.bottom = 96;
+        rcCard.left = 8; rcCard.top = 8; rcCard.right = 88; rcCard.bottom = 88;
+
+        hPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
+        hOldP = (HPEN)SelectObject(hdcMem, hPen);
+        hBrush = CreateSolidBrush(RGB(255, 255, 255));
+        hOldBr = (HBRUSH)SelectObject(hdcMem, hBrush);
+
+        FillRect(hdcMem, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        Rectangle(hdcMem, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom);
+
+        if (hIcon) {
+            DrawIconEx(hdcMem, (96 - 32) / 2, (96 - 32) / 2, hIcon, 32, 32, 0, NULL, DI_NORMAL);
+        }
+
+        SelectObject(hdcMem, hOldBr);
+        SelectObject(hdcMem, hOldP);
+        SelectObject(hdcMem, hOldB);
+        DeleteObject(hBrush);
+        DeleteObject(hPen);
+    }
+    if (hdcMem) DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+    return hBmp;
+}
+
 static BOOL IsImageObject(const OBJECT_ITEM *obj)
 {
-    char nameA[256];
-    const char *dot;
+    const WCHAR *wdot;
     if (!obj || obj->IsFolder) return FALSE;
-    if (obj->Format == MTP_FORMAT_EXIF_JPEG || obj->Format == MTP_FORMAT_BMP) {
+
+    if (obj->Format == MTP_FORMAT_EXIF_JPEG ||
+        obj->Format == 0x3808 || /* MTP_FORMAT_JFIF */
+        obj->Format == MTP_FORMAT_BMP ||
+        obj->Format == 0x3807 || /* MTP_FORMAT_GIF */
+        obj->Format == 0x380B || /* MTP_FORMAT_PNG */
+        obj->Format == 0x3802 || /* MTP_FORMAT_TIFF_EP */
+        obj->Format == 0x380D) { /* MTP_FORMAT_TIFF */
         return TRUE;
     }
-    WideCharToMultiByte(CP_ACP, 0, obj->Name, -1, nameA, sizeof(nameA), NULL, NULL);
-    dot = strrchr(nameA, '.');
-    if (dot) {
-        if (_stricmp(dot, ".jpg") == 0 || _stricmp(dot, ".jpeg") == 0 ||
-            _stricmp(dot, ".bmp") == 0 || _stricmp(dot, ".gif") == 0) {
+
+    wdot = wcsrchr(obj->Name, L'.');
+    if (wdot) {
+        if (_wcsicmp(wdot, L".jpg") == 0 || _wcsicmp(wdot, L".jpeg") == 0 ||
+            _wcsicmp(wdot, L".jpe") == 0 || _wcsicmp(wdot, L".jfif") == 0 ||
+            _wcsicmp(wdot, L".bmp") == 0 || _wcsicmp(wdot, L".dib") == 0 ||
+            _wcsicmp(wdot, L".gif") == 0 || _wcsicmp(wdot, L".png") == 0 ||
+            _wcsicmp(wdot, L".ico") == 0 || _wcsicmp(wdot, L".tif") == 0 ||
+            _wcsicmp(wdot, L".tiff") == 0) {
             return TRUE;
         }
     }
@@ -2681,10 +3067,6 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
     BOOL found;
     DWORD k;
     HBITMAP hBmp;
-    DWORD params[1];
-    BYTE *thumbBuf;
-    DWORD thumbBytes;
-    BOOL bThumbOk;
     DWORD totalSize;
     BYTE *imgBuf;
     DWORD transferred;
@@ -2698,9 +3080,6 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
     handle = (DWORD)(DWORD_PTR)lpParam;
     found = FALSE;
     hBmp = NULL;
-    thumbBuf = NULL;
-    thumbBytes = 0;
-    bThumbOk = FALSE;
 
     if (handle == 0 || g_CancelPreview) return 0;
 
@@ -2723,18 +3102,44 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
         return 0;
     }
 
-    /* Method 1: PTP/MTP GetThumb (0x100A) - Instant thumbnail for camera & gallery photos */
-    params[0] = handle;
-    thumbBuf = (BYTE*)malloc(131072);
-    if (thumbBuf) {
-        bThumbOk = MtpSendOperation(0x100A, params, 1, NULL, 0, thumbBuf, 131072, &thumbBytes);
-        if (bThumbOk && thumbBytes > 64) {
-            if ((thumbBuf[0] == 0xFF && thumbBuf[1] == 0xD8) ||
-                (thumbBuf[0] == 'B' && thumbBuf[1] == 'M')) {
-                hBmp = LoadImageFromMemory(thumbBuf, thumbBytes, PREVIEW_BOX_W, PREVIEW_BOX_H);
+    /* Method 1: Fast MTP GetThumb (0x100A) - Low-level real thumbnail directly from device */
+    if (!hBmp && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
+        DWORD tParam = handle;
+        DWORD thumbBytes = 0;
+        BYTE *tBuf = (BYTE*)malloc(131072);
+        if (tBuf) {
+            if (MtpSendOperation(MTP_OP_GET_THUMB, &tParam, 1, NULL, 0, tBuf, 131072, &thumbBytes) &&
+                thumbBytes > 128 && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
+                DWORD actualBytes = thumbBytes;
+                const BYTE *pImg = FindImageStart(tBuf, thumbBytes, &actualBytes);
+                hBmp = LoadImageFromMemory(pImg, actualBytes, PREVIEW_BOX_W, PREVIEW_BOX_H);
             }
+            free(tBuf);
         }
-        free(thumbBuf);
+    }
+
+    /* Method 2: Fast EXIF embedded thumbnail extraction via MTP GetPartialObject (0x9107) */
+    if (!hBmp && item.Size > 128 && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
+        DWORD headerSize = (item.Size > 65536) ? 65536 : (DWORD)item.Size;
+        BYTE *headBuf = (BYTE*)malloc(headerSize);
+        if (headBuf) {
+            DWORD bRet = 0;
+            DWORD pParams[3];
+            pParams[0] = handle;
+            pParams[1] = 0;          /* Byte offset 0 */
+            pParams[2] = headerSize; /* Max bytes to read */
+
+            bPartOk = MtpSendOperation(MTP_OP_GET_PARTIAL_OBJECT, pParams, 3,
+                                       NULL, 0, headBuf, headerSize, &bRet);
+
+            if (bPartOk && bRet > 128) {
+                DWORD thumbOff = 0, thumbLen = 0;
+                if (FindExifThumbnail(headBuf, bRet, &thumbOff, &thumbLen)) {
+                    hBmp = LoadImageFromMemory(headBuf + thumbOff, thumbLen, PREVIEW_BOX_W, PREVIEW_BOX_H);
+                }
+            }
+            free(headBuf);
+        }
     }
 
     if (g_CancelPreview || handle != g_CurrentPreviewHandle) {
@@ -2743,8 +3148,8 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
         return 0;
     }
 
-    /* Method 2: If no embedded thumb (e.g. screenshots), download full image if <= 3 MB */
-    if (!hBmp && item.Size > 0 && item.Size <= (3000 * 1024ULL)) {
+    /* Method 3: If no thumbnail available (e.g. uncompressed images), download full image if <= 8 MB */
+    if (!hBmp && item.Size > 0 && item.Size <= (8192 * 1024ULL)) {
         totalSize = (DWORD)item.Size;
         imgBuf = (BYTE*)malloc(totalSize);
         if (imgBuf) {
@@ -2771,7 +3176,9 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
             }
 
             if (transferred == totalSize && !g_CancelPreview && handle == g_CurrentPreviewHandle) {
-                hBmp = LoadImageFromMemory(imgBuf, totalSize, PREVIEW_BOX_W, PREVIEW_BOX_H);
+                DWORD actualBytes = totalSize;
+                const BYTE *pImg = FindImageStart(imgBuf, totalSize, &actualBytes);
+                hBmp = LoadImageFromMemory(pImg, actualBytes, PREVIEW_BOX_W, PREVIEW_BOX_H);
             }
             free(imgBuf);
         }
@@ -2781,6 +3188,19 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
         if (!g_CancelPreview && handle == g_CurrentPreviewHandle) {
             AddCachedPreview(handle, hBmp);
             PostMessage(g_hMainWnd, WM_USER_PREVIEW_READY, (WPARAM)handle, 0);
+
+            /* If in Thumbnails or Large Icon view, also produce icon immediately */
+            if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                HBITMAP hThumb96 = ScaleBitmapToSize(hBmp, 96);
+                if (hThumb96) {
+                    PostMessage(g_hMainWnd, WM_USER_THUMB_READY, (WPARAM)handle, (LPARAM)hThumb96);
+                }
+            } else if (g_CurrentViewMode == LVS_ICON) {
+                HBITMAP hThumb32 = ScaleBitmapTo32(hBmp);
+                if (hThumb32) {
+                    PostMessage(g_hMainWnd, WM_USER_THUMB_READY, (WPARAM)handle, (LPARAM)hThumb32);
+                }
+            }
         } else {
             DeleteObject(hBmp);
         }
@@ -2788,6 +3208,389 @@ static DWORD WINAPI PreviewWorkerThread(LPVOID lpParam)
 
     CoUninitialize();
     return 0;
+}
+
+/* ============================================================================
+ * Background Thumbnail Loader for Large Icon View
+ * ============================================================================ */
+
+static void StopThumbnailLoader(void)
+{
+    InterlockedIncrement(&g_ThumbEpoch);
+    InterlockedExchange(&g_CancelThumb, 1);
+    if (g_hThumbThread) {
+        if (WaitForSingleObject(g_hThumbThread, 1500) == WAIT_TIMEOUT) {
+            DebugLog("[THUMB] Worker thread graceful wait timed out (1.5s)");
+        }
+        CloseHandle(g_hThumbThread);
+        g_hThumbThread = NULL;
+    }
+}
+
+static void ResetLargeImageListThumbs(void)
+{
+    int count;
+    DWORD k;
+    StopThumbnailLoader();
+
+    /* Bump epoch so any in-flight WM_USER_THUMB_READY messages are discarded */
+    InterlockedIncrement(&g_ThumbEpoch);
+
+    if (g_hLargeImageList) {
+        count = ImageList_GetImageCount(g_hLargeImageList);
+        while (count > 6) {
+            ImageList_Remove(g_hLargeImageList, count - 1);
+            count--;
+        }
+    }
+    if (g_hThumbImageList) {
+        count = ImageList_GetImageCount(g_hThumbImageList);
+        while (count > 6) {
+            ImageList_Remove(g_hThumbImageList, count - 1);
+            count--;
+        }
+    }
+
+    /* Reset per-object thumbnail indices so stale indices don't reference
+     * removed image list entries (which would cause icon display corruption) */
+    EnterCriticalSection(&g_ObjectsCs);
+    if (g_Objects) {
+        for (k = 0; k < g_ObjectCount; k++) {
+            g_Objects[k].ThumbIconIndex = -1;
+            g_Objects[k].BigThumbIconIndex = -1;
+        }
+    }
+    LeaveCriticalSection(&g_ObjectsCs);
+}
+
+/* Map virtual ListView item index (0..29 in Thumbnails mode) to the global object array index */
+static int ListViewIndexToObjectIndex(int lvIndex)
+{
+    if (lvIndex < 0) return -1;
+    if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+        return (g_ThumbCurrentPage - 1) * THUMB_PAGE_SIZE + lvIndex;
+    }
+    return lvIndex;
+}
+
+/* Map global object array index to current virtual ListView item index (or -1 if not on current page) */
+static int ObjectIndexToListViewIndex(int objIndex)
+{
+    if (objIndex < 0) return -1;
+    if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+        int page = objIndex / THUMB_PAGE_SIZE + 1;
+        if (page == g_ThumbCurrentPage) {
+            return objIndex % THUMB_PAGE_SIZE;
+        }
+        return -1;
+    }
+    return objIndex;
+}
+
+static DWORD WINAPI ThumbLoaderWorker(LPVOID lpParam)
+{
+    int totalCount;
+    int pageStartIdx;
+    int itemsOnPage;
+    int i;
+    BYTE *thumbBuf;
+    DWORD thumbBufCap = 524288; /* 512 KB */
+    int targetSize = 96; /* Only running in VIEW_MODE_THUMBNAILS */
+    LONG myEpoch;
+
+    (void)lpParam;
+
+    myEpoch = g_ThumbEpoch;
+
+    thumbBuf = (BYTE*)malloc(thumbBufCap);
+    if (!thumbBuf) return 0;
+
+    CoInitialize(NULL);
+
+    EnterCriticalSection(&g_ObjectsCs);
+    totalCount = (int)g_ObjectCount;
+    LeaveCriticalSection(&g_ObjectsCs);
+
+    if (totalCount <= 0 || g_CurrentViewMode != VIEW_MODE_THUMBNAILS) {
+        goto worker_exit;
+    }
+
+    pageStartIdx = (g_ThumbCurrentPage - 1) * THUMB_PAGE_SIZE;
+    if (pageStartIdx >= totalCount) goto worker_exit;
+
+    itemsOnPage = totalCount - pageStartIdx;
+    if (itemsOnPage > THUMB_PAGE_SIZE) itemsOnPage = THUMB_PAGE_SIZE;
+
+    /* Strictly load ONLY the items on the current page (max 30 items) */
+    for (i = 0; i < itemsOnPage; i++) {
+        int targetIdx = pageStartIdx + i;
+        DWORD handle = 0;
+        BOOL isImg = FALSE;
+        int thumbIdx = -1;
+        ULONGLONG itemSize = 0;
+        HBITMAP hBmpThumb = NULL;
+
+        if (g_CancelThumb || !g_Connected || g_bTransferRunning ||
+            g_bSearchRunning || myEpoch != g_ThumbEpoch ||
+            g_CurrentViewMode != VIEW_MODE_THUMBNAILS) {
+            break;
+        }
+
+        EnterCriticalSection(&g_ObjectsCs);
+        if (g_Objects && targetIdx < (int)g_ObjectCount) {
+            if (!g_Objects[targetIdx].IsFolder) {
+                isImg = IsImageObject(&g_Objects[targetIdx]);
+                handle = g_Objects[targetIdx].Handle;
+                itemSize = g_Objects[targetIdx].Size;
+                thumbIdx = g_Objects[targetIdx].BigThumbIconIndex;
+            }
+        }
+        LeaveCriticalSection(&g_ObjectsCs);
+
+        if (!isImg || handle == 0 || thumbIdx >= 0) {
+            continue;
+        }
+
+        /* 1. Check RAM preview cache first (0 ms) */
+        {
+            HBITMAP hCached = GetCachedPreview(handle);
+            if (hCached) {
+                hBmpThumb = ScaleBitmapToSize(hCached, targetSize);
+            }
+        }
+
+        /* 2. Fast MTP GetThumb (0x100A) - Low-level real thumbnail from device */
+        if (!hBmpThumb && !g_CancelThumb && myEpoch == g_ThumbEpoch) {
+            DWORD thumbBytes = 0;
+            DWORD thumbParam = handle;
+            BOOL bThumbOk = MtpSendOperation(MTP_OP_GET_THUMB, &thumbParam, 1,
+                                             NULL, 0, thumbBuf, thumbBufCap, &thumbBytes);
+            if (bThumbOk && thumbBytes > 128 && !g_CancelThumb && myEpoch == g_ThumbEpoch) {
+                DWORD actualBytes = thumbBytes;
+                const BYTE *pImg = FindImageStart(thumbBuf, thumbBytes, &actualBytes);
+                HBITMAP hDecoded = LoadImageFromMemory(pImg, actualBytes, PREVIEW_BOX_W, PREVIEW_BOX_H);
+                if (hDecoded) {
+                    AddCachedPreview(handle, hDecoded);
+                    hBmpThumb = ScaleBitmapToSize(hDecoded, targetSize);
+                }
+            }
+        }
+
+        /* 3. Fallback: EXIF embedded thumbnail extraction via MTP GetPartialObject (0x9107) */
+        if (!hBmpThumb && itemSize > 128 && !g_CancelThumb && myEpoch == g_ThumbEpoch) {
+            DWORD headerSize = (itemSize > 65536) ? 65536 : (DWORD)itemSize;
+            DWORD pParams[3];
+            DWORD bRet = 0;
+
+            pParams[0] = handle;
+            pParams[1] = 0;          /* Byte offset 0 */
+            pParams[2] = headerSize; /* Max 64 KB */
+
+            if (MtpSendOperation(MTP_OP_GET_PARTIAL_OBJECT, pParams, 3,
+                                 NULL, 0, thumbBuf, headerSize, &bRet)) {
+                if (bRet > 128 && !g_CancelThumb && myEpoch == g_ThumbEpoch) {
+                    DWORD thumbOff = 0, thumbLen = 0;
+                    if (FindExifThumbnail(thumbBuf, bRet, &thumbOff, &thumbLen)) {
+                        HBITMAP hExif = LoadImageFromMemory(thumbBuf + thumbOff, thumbLen, PREVIEW_BOX_W, PREVIEW_BOX_H);
+                        if (hExif) {
+                            AddCachedPreview(handle, hExif);
+                            hBmpThumb = ScaleBitmapToSize(hExif, targetSize);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hBmpThumb) {
+            if (!g_CancelThumb && myEpoch == g_ThumbEpoch && g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                PostMessage(g_hMainWnd, WM_USER_THUMB_READY, (WPARAM)handle, (LPARAM)hBmpThumb);
+                if (handle == g_CurrentPreviewHandle) {
+                    PostMessage(g_hMainWnd, WM_USER_PREVIEW_READY, (WPARAM)handle, 0);
+                }
+            } else {
+                DeleteObject(hBmpThumb);
+            }
+        }
+
+        /* Yield between thumbnails */
+        Sleep(10);
+    }
+
+worker_exit:
+    free(thumbBuf);
+    CoUninitialize();
+    return 0;
+}
+
+static void StartThumbnailLoader(void)
+{
+    if (!g_Connected || g_hDevice == INVALID_HANDLE_VALUE ||
+        g_bTransferRunning || g_bSearchRunning || g_IsEnumerating ||
+        g_CurrentViewMode != VIEW_MODE_THUMBNAILS) {
+        return;
+    }
+    StopThumbnailLoader();
+    InterlockedExchange(&g_CancelThumb, 0);
+    g_hThumbThread = CreateThread(NULL, 0, ThumbLoaderWorker, NULL, 0, NULL);
+    if (g_hThumbThread) {
+        SetThreadPriority(g_hThumbThread, THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+LRESULT CALLBACK PaginationBarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == WM_COMMAND) {
+        return SendMessage(GetParent(hWnd), WM_COMMAND, wParam, lParam);
+    }
+    if (uMsg == WM_ERASEBKGND) {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        HPEN hPen, hOldPen;
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        hPen = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_BTNSHADOW));
+        hOldPen = (HPEN)SelectObject(hdc, hPen);
+        MoveToEx(hdc, rc.left, 0, NULL);
+        LineTo(hdc, rc.right, 0);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
+        return 1;
+    }
+    return CallWindowProcA(g_pfnOldPaginationBarProc, hWnd, uMsg, wParam, lParam);
+}
+
+static void CreatePaginationBar(HWND hWnd)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    g_hPaginationBar = CreateWindowExA(
+        0, "STATIC", "",
+        WS_CHILD | WS_CLIPSIBLINGS,
+        0, 0, 100, 26,
+        hWnd, (HMENU)IDC_PAGINATION_BAR, g_hInstance, NULL
+    );
+    if (g_hPaginationBar) {
+        g_pfnOldPaginationBarProc = (WNDPROC)SetWindowLongA(g_hPaginationBar, GWL_WNDPROC, (LONG)PaginationBarSubclassProc);
+    }
+
+    g_hBtnFirstPage = CreateWindowExA(
+        0, "BUTTON", "|<<",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        0, 2, 45, 22,
+        g_hPaginationBar, (HMENU)IDC_BTN_FIRST_PAGE, g_hInstance, NULL
+    );
+    if (hFont) SendMessage(g_hBtnFirstPage, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    g_hBtnPrevPage = CreateWindowExA(
+        0, "BUTTON", "< Previous",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        50, 2, 75, 22,
+        g_hPaginationBar, (HMENU)IDC_BTN_PREV_PAGE, g_hInstance, NULL
+    );
+    if (hFont) SendMessage(g_hBtnPrevPage, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    g_hStaticPageInfo = CreateWindowExA(
+        0, "STATIC", "Page 1 of 1",
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+        130, 2, 280, 22,
+        g_hPaginationBar, (HMENU)IDC_STATIC_PAGE_INFO, g_hInstance, NULL
+    );
+    if (hFont) SendMessage(g_hStaticPageInfo, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    g_hBtnNextPage = CreateWindowExA(
+        0, "BUTTON", "Next >",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        415, 2, 75, 22,
+        g_hPaginationBar, (HMENU)IDC_BTN_NEXT_PAGE, g_hInstance, NULL
+    );
+    if (hFont) SendMessage(g_hBtnNextPage, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    g_hBtnLastPage = CreateWindowExA(
+        0, "BUTTON", ">>|",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        495, 2, 45, 22,
+        g_hPaginationBar, (HMENU)IDC_BTN_LAST_PAGE, g_hInstance, NULL
+    );
+    if (hFont) SendMessage(g_hBtnLastPage, WM_SETFONT, (WPARAM)hFont, TRUE);
+}
+
+static void UpdatePaginationControls(int currentPage, int totalPages, DWORD totalCount)
+{
+    char buf[128];
+    int startItem, endItem;
+
+    if (!g_hPaginationBar) return;
+
+    if (totalCount == 0) {
+        _snprintf(buf, sizeof(buf), "0 objects");
+        EnableWindow(g_hBtnFirstPage, FALSE);
+        EnableWindow(g_hBtnPrevPage, FALSE);
+        EnableWindow(g_hBtnNextPage, FALSE);
+        EnableWindow(g_hBtnLastPage, FALSE);
+    } else {
+        startItem = (currentPage - 1) * THUMB_PAGE_SIZE + 1;
+        endItem = currentPage * THUMB_PAGE_SIZE;
+        if ((DWORD)endItem > totalCount) endItem = (int)totalCount;
+
+        _snprintf(buf, sizeof(buf), "Page %d of %d  (Items %d - %d of %lu)",
+                  currentPage, totalPages, startItem, endItem, totalCount);
+        buf[sizeof(buf) - 1] = '\0';
+
+        EnableWindow(g_hBtnFirstPage, currentPage > 1);
+        EnableWindow(g_hBtnPrevPage, currentPage > 1);
+        EnableWindow(g_hBtnNextPage, currentPage < totalPages);
+        EnableWindow(g_hBtnLastPage, currentPage < totalPages);
+    }
+
+    if (g_hStaticPageInfo) {
+        SetWindowTextA(g_hStaticPageInfo, buf);
+    }
+}
+
+static void SetThumbPage(int newPage)
+{
+    DWORD totalCount;
+    int totalPages;
+    int pageStartIdx;
+    int itemsOnPage;
+
+    EnterCriticalSection(&g_ObjectsCs);
+    totalCount = g_ObjectCount;
+    LeaveCriticalSection(&g_ObjectsCs);
+
+    if (totalCount == 0) {
+        g_ThumbCurrentPage = 1;
+        UpdatePaginationControls(1, 1, 0);
+        if (g_hListView) ListView_SetItemCountEx(g_hListView, 0, LVSICF_NOINVALIDATEALL);
+        return;
+    }
+
+    totalPages = (int)((totalCount + THUMB_PAGE_SIZE - 1) / THUMB_PAGE_SIZE);
+    if (totalPages < 1) totalPages = 1;
+
+    if (newPage < 1) newPage = 1;
+    if (newPage > totalPages) newPage = totalPages;
+
+    /* Stop previous background loader before page transition */
+    StopThumbnailLoader();
+
+    g_ThumbCurrentPage = newPage;
+    pageStartIdx = (g_ThumbCurrentPage - 1) * THUMB_PAGE_SIZE;
+    itemsOnPage = (int)(totalCount - pageStartIdx);
+    if (itemsOnPage > THUMB_PAGE_SIZE) itemsOnPage = THUMB_PAGE_SIZE;
+
+    ResetLargeImageListThumbs();
+
+    if (g_hListView) {
+        ListView_SetItemCountEx(g_hListView, itemsOnPage, LVSICF_NOINVALIDATEALL);
+        ListView_Arrange(g_hListView, LVA_DEFAULT);
+        InvalidateRect(g_hListView, NULL, TRUE);
+        UpdateWindow(g_hListView);
+    }
+
+    UpdatePaginationControls(g_ThumbCurrentPage, totalPages, totalCount);
+
+    StartThumbnailLoader();
 }
 
 /* ============================================================================
@@ -2932,23 +3735,18 @@ LRESULT CALLBACK WebViewWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             hOldFont = (HFONT)SelectObject(hdc, hTitleFont);
             SetTextColor(hdc, RGB(0, 0, 0));
             
-            if (g_CurrentParent == 0) {
+            if (g_CurrentParent == 0 || g_CurrentParent == MTP_PARENT_ROOT) {
                 TextOutA(hdc, 16, 48, g_szRootName, (int)strlen(g_szRootName));
             } else {
                 char folderTitle[64];
-                DWORD k;
-
-                strcpy(folderTitle, "Subfolder");
-                EnterCriticalSection(&g_ObjectsCs);
-                if (g_Objects) {
-                    for (k = 0; k < g_ObjectCount; k++) {
-                        if (g_Objects[k].Handle == g_CurrentParent) {
-                            WideCharToMultiByte(CP_ACP, 0, g_Objects[k].Name, -1, folderTitle, sizeof(folderTitle), NULL, NULL);
-                            break;
-                        }
-                    }
+                const char *lastSlash = strrchr(g_szCurrentPath, '\\');
+                if (lastSlash && lastSlash[1]) {
+                    strncpy(folderTitle, lastSlash + 1, sizeof(folderTitle) - 1);
+                    folderTitle[sizeof(folderTitle) - 1] = '\0';
+                } else {
+                    strncpy(folderTitle, g_szCurrentPath, sizeof(folderTitle) - 1);
+                    folderTitle[sizeof(folderTitle) - 1] = '\0';
                 }
-                LeaveCriticalSection(&g_ObjectsCs);
                 TextOutA(hdc, 16, 48, folderTitle, (int)strlen(folderTitle));
             }
             
@@ -2963,9 +3761,10 @@ LRESULT CALLBACK WebViewWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             /* Check if item is selected in ListView */
             selIndex = ListView_GetNextItem(g_hListView, -1, LVNI_SELECTED);
             if (selIndex != -1) {
+                int objIdx = ListViewIndexToObjectIndex(selIndex);
                 EnterCriticalSection(&g_ObjectsCs);
-                if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-                    selectedObjCopy = g_Objects[selIndex];
+                if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+                    selectedObjCopy = g_Objects[objIdx];
                     selectedObj = &selectedObjCopy;
                 }
                 LeaveCriticalSection(&g_ObjectsCs);
@@ -3215,6 +4014,7 @@ void CreateMainMenu(HWND hWnd)
     AppendMenuA(hViewMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(hViewMenu, MF_POPUP, (UINT_PTR)hArrangeMenu, "Arrange &Icons");
     AppendMenuA(hViewMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(hViewMenu, MF_STRING | (g_CurrentViewMode == VIEW_MODE_THUMBNAILS ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_THUMBNAILS, "Th&umbnails");
     AppendMenuA(hViewMenu, MF_STRING | (g_CurrentViewMode == LVS_ICON ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_LARGE_ICONS, "Lar&ge Icons");
     AppendMenuA(hViewMenu, MF_STRING | (g_CurrentViewMode == LVS_SMALLICON ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_SMALL_ICONS, "S&mall Icons");
     AppendMenuA(hViewMenu, MF_STRING | (g_CurrentViewMode == LVS_LIST ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_LIST, "&List");
@@ -4755,12 +5555,14 @@ void CreateListView(HWND hWnd)
 {
     LVCOLUMNA lvc;
     SHFILEINFOA shfi;
+    HBITMAP hCardBmp;
     
     g_hListView = CreateWindowExA(
         WS_EX_CLIENTEDGE,
         WC_LISTVIEWA,
         NULL,
-        WS_CHILD | WS_VISIBLE | LVS_ICON | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_OWNERDATA,
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_TABSTOP |
+        LVS_ICON | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_OWNERDATA,
         0, 0, 100, 100,
         hWnd,
         (HMENU)IDC_LISTVIEW,
@@ -4773,7 +5575,8 @@ void CreateListView(HWND hWnd)
     
     /* Create Shell Image Lists */
     g_hSmallImageList = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 6, 0);
-    g_hLargeImageList = ImageList_Create(32, 32, ILC_COLOR32 | ILC_MASK, 6, 0);
+    g_hLargeImageList = ImageList_Create(32, 32, ILC_COLOR32 | ILC_MASK, 6, 64);
+    g_hThumbImageList = ImageList_Create(96, 96, ILC_COLOR32 | ILC_MASK, 6, 64);
     
     /* 0: Folder */
     SHGetFileInfoA("folder", FILE_ATTRIBUTE_DIRECTORY, &shfi, sizeof(shfi),
@@ -4783,6 +5586,11 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA("folder", FILE_ATTRIBUTE_DIRECTORY, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
     /* 1: Text file */
@@ -4793,6 +5601,11 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA(".txt", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
     /* 2: Image file */
@@ -4803,6 +5616,11 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA(".jpg", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
     /* 3: Audio file */
@@ -4813,6 +5631,11 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA(".mp3", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
     /* 4: Video file */
@@ -4823,6 +5646,11 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA(".avi", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
     /* 5: Generic file */
@@ -4833,9 +5661,20 @@ void CreateListView(HWND hWnd)
     SHGetFileInfoA(".dat", FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi),
                    SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES);
     ImageList_AddIcon(g_hLargeImageList, shfi.hIcon);
+    hCardBmp = CreateThumbnailCardFromIcon(shfi.hIcon);
+    if (hCardBmp) {
+        ImageList_Add(g_hThumbImageList, hCardBmp, NULL);
+        DeleteObject(hCardBmp);
+    }
     DestroyIcon(shfi.hIcon);
     
-    ListView_SetImageList(g_hListView, g_hLargeImageList, LVSIL_NORMAL);
+    if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+        ListView_SetImageList(g_hListView, g_hThumbImageList, LVSIL_NORMAL);
+        SendMessage(g_hListView, LVM_SETICONSPACING, 0, MAKELPARAM(120, 125));
+    } else {
+        ListView_SetImageList(g_hListView, g_hLargeImageList, LVSIL_NORMAL);
+        SendMessage(g_hListView, LVM_SETICONSPACING, 0, MAKELPARAM(75, 75));
+    }
     ListView_SetImageList(g_hListView, g_hSmallImageList, LVSIL_SMALL);
     
     /* Details columns */
@@ -4871,11 +5710,24 @@ void CreateListView(HWND hWnd)
 
 LRESULT CALLBACK ListViewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    if (uMsg == WM_VSCROLL || uMsg == WM_HSCROLL || uMsg == WM_MOUSEWHEEL) {
+        return CallWindowProcA(g_pfnOrigListViewProc, hWnd, uMsg, wParam, lParam);
+    }
     if (uMsg == WM_DROPFILES) {
         SendMessage(g_hMainWnd, WM_DROPFILES, wParam, lParam);
         return 0;
     }
     if (uMsg == WM_KEYDOWN) {
+        if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+            if (wParam == VK_PRIOR) {
+                SetThumbPage(g_ThumbCurrentPage - 1);
+                return 0;
+            }
+            if (wParam == VK_NEXT) {
+                SetThumbPage(g_ThumbCurrentPage + 1);
+                return 0;
+            }
+        }
         if (wParam == VK_ESCAPE) {
             if (g_IsEnumerating) {
                 InterlockedExchange(&g_CancelEnum, 1);
@@ -4940,11 +5792,48 @@ void SetViewMode(int viewMode)
     g_CurrentViewMode = viewMode;
     dwStyle = GetWindowLong(g_hListView, GWL_STYLE);
     dwStyle &= ~(LVS_ICON | LVS_REPORT | LVS_SMALLICON | LVS_LIST);
-    dwStyle |= viewMode;
+    if (viewMode == VIEW_MODE_THUMBNAILS) {
+        dwStyle |= LVS_ICON;
+    } else {
+        dwStyle |= viewMode;
+    }
     SetWindowLong(g_hListView, GWL_STYLE, dwStyle);
-    InvalidateRect(g_hListView, NULL, TRUE);
+
+    if (viewMode == VIEW_MODE_THUMBNAILS) {
+        if (g_hThumbImageList) {
+            ListView_SetImageList(g_hListView, g_hThumbImageList, LVSIL_NORMAL);
+        }
+        SendMessage(g_hListView, LVM_SETICONSPACING, 0, MAKELPARAM(120, 125));
+        if (g_hMainWnd) {
+            SendMessage(g_hMainWnd, WM_SIZE, 0, 0);
+        }
+        if (g_hPaginationBar) {
+            ShowWindow(g_hPaginationBar, SW_SHOW);
+        }
+        SetThumbPage(1);
+    } else {
+        StopThumbnailLoader();
+        if (g_hPaginationBar) {
+            ShowWindow(g_hPaginationBar, SW_HIDE);
+        }
+        if (g_hLargeImageList) {
+            ListView_SetImageList(g_hListView, g_hLargeImageList, LVSIL_NORMAL);
+        }
+        SendMessage(g_hListView, LVM_SETICONSPACING, 0, MAKELPARAM(75, 75));
+        if (g_hMainWnd) {
+            SendMessage(g_hMainWnd, WM_SIZE, 0, 0);
+        }
+        if (g_hListView) {
+            ListView_SetItemCountEx(g_hListView, g_ObjectCount, LVSICF_NOINVALIDATEALL);
+            if (viewMode == LVS_ICON) {
+                ListView_Arrange(g_hListView, LVA_DEFAULT);
+            }
+            InvalidateRect(g_hListView, NULL, TRUE);
+        }
+    }
     
     if (hMenu) {
+        CheckMenuItem(hMenu, IDM_VIEW_THUMBNAILS, (viewMode == VIEW_MODE_THUMBNAILS) ? MF_CHECKED : MF_UNCHECKED);
         CheckMenuItem(hMenu, IDM_VIEW_LARGE_ICONS, (viewMode == LVS_ICON) ? MF_CHECKED : MF_UNCHECKED);
         CheckMenuItem(hMenu, IDM_VIEW_SMALL_ICONS, (viewMode == LVS_SMALLICON) ? MF_CHECKED : MF_UNCHECKED);
         CheckMenuItem(hMenu, IDM_VIEW_LIST, (viewMode == LVS_LIST) ? MF_CHECKED : MF_UNCHECKED);
@@ -5003,11 +5892,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             CreateAddressBar(hWnd);
             CreateWebView(hWnd);
             CreateListView(hWnd);
+            CreatePaginationBar(hWnd);
             CreateStatusBar(hWnd);
             DragAcceptFiles(hWnd, TRUE);
             SetTimer(hWnd, TIMER_DEVICE_CHECK, 2000, NULL);
             UpdateUI();
             return 0;
+
+        case WM_MOUSEWHEEL:
+            if (g_hListView && IsWindow(g_hListView)) {
+                return SendMessage(g_hListView, WM_MOUSEWHEEL, wParam, lParam);
+            }
+            break;
 
         case WM_INITMENUPOPUP: {
             HMENU hMenuPopup = (HMENU)wParam;
@@ -5082,19 +5978,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (wParam == TIMER_PREVIEW_DEBOUNCE) {
                 KillTimer(hWnd, TIMER_PREVIEW_DEBOUNCE);
                 if (g_Connected && g_hDevice != INVALID_HANDLE_VALUE &&
-                    !g_bSearchRunning && !g_IsEnumerating && !g_bTransferRunning) {
+                    !g_bSearchRunning && !g_IsEnumerating && !g_bTransferRunning &&
+                    g_CurrentViewMode != VIEW_MODE_THUMBNAILS) {
                     DWORD handle = g_CurrentPreviewHandle;
                     if (handle != 0 && !GetCachedPreview(handle)) {
-                        /* Cancel any existing preview thread */
-                        InterlockedExchange(&g_CancelPreview, 1);
+                        /* Check if existing preview thread is still running */
                         if (g_hPreviewThread) {
-                            WaitForSingleObject(g_hPreviewThread, 100);
+                            if (WaitForSingleObject(g_hPreviewThread, 0) == WAIT_TIMEOUT) {
+                                /* Still busy finishing previous I/O; retry in 50ms without blocking UI */
+                                SetTimer(hWnd, TIMER_PREVIEW_DEBOUNCE, 50, NULL);
+                                return 0;
+                            }
                             CloseHandle(g_hPreviewThread);
                             g_hPreviewThread = NULL;
                         }
                         InterlockedExchange(&g_CancelPreview, 0);
                         g_hPreviewThread = CreateThread(NULL, 0, PreviewWorkerThread, (LPVOID)(DWORD_PTR)handle, 0, NULL);
+                        if (g_hPreviewThread) {
+                            SetThreadPriority(g_hPreviewThread, THREAD_PRIORITY_BELOW_NORMAL);
+                        }
                     }
+                }
+                return 0;
+            }
+            if (wParam == TIMER_THUMB_SCROLL_DEBOUNCE) {
+                KillTimer(hWnd, TIMER_THUMB_SCROLL_DEBOUNCE);
+                if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS &&
+                    !g_bTransferRunning && !g_bSearchRunning && !g_IsEnumerating) {
+                    StartThumbnailLoader();
                 }
                 return 0;
             }
@@ -5125,6 +6036,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             DWORD handle = (DWORD)wParam;
             if (handle == g_CurrentPreviewHandle && g_hWebView) {
                 InvalidateRect(g_hWebView, NULL, TRUE);
+            }
+            return 0;
+        }
+
+        case WM_USER_THUMB_READY: {
+            DWORD handle = (DWORD)wParam;
+            HBITMAP hBmp = (HBITMAP)lParam;
+            if (hBmp) {
+                if (g_Objects && handle != 0 && g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                    DWORD k;
+                    int foundIdx = -1;
+                    EnterCriticalSection(&g_ObjectsCs);
+                    for (k = 0; k < g_ObjectCount; k++) {
+                        if (g_Objects[k].Handle == handle) {
+                            foundIdx = (int)k;
+                            break;
+                        }
+                    }
+                    if (foundIdx != -1) {
+                        if (g_hThumbImageList && g_Objects[foundIdx].BigThumbIconIndex < 0) {
+                            int iconIdx = ImageList_Add(g_hThumbImageList, hBmp, NULL);
+                            if (iconIdx >= 0) {
+                                g_Objects[foundIdx].BigThumbIconIndex = iconIdx;
+                                if (g_hListView && g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                                    int lvIdx = ObjectIndexToListViewIndex(foundIdx);
+                                    if (lvIdx >= 0) {
+                                        ListView_RedrawItems(g_hListView, lvIdx, lvIdx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    LeaveCriticalSection(&g_ObjectsCs);
+                }
+                DeleteObject(hBmp);
             }
             return 0;
         }
@@ -5201,7 +6147,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ShowWindow(g_hWebView, SW_HIDE);
             }
             
-            MoveWindow(g_hListView, webViewW, contentTop, clientW - webViewW, contentH, TRUE);
+            if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS && g_hPaginationBar) {
+                int listW = clientW - webViewW;
+                int pagHeight = 26;
+                if (contentH > pagHeight) {
+                    MoveWindow(g_hListView, webViewW, contentTop, listW, contentH - pagHeight, TRUE);
+                    MoveWindow(g_hPaginationBar, webViewW, contentTop + contentH - pagHeight, listW, pagHeight, TRUE);
+                    ShowWindow(g_hPaginationBar, SW_SHOW);
+                    
+                    /* Center pagination controls inside bar */
+                    {
+                        int totalCtrlW = 380;
+                        int startX = (listW - totalCtrlW) / 2;
+                        if (startX < 4) startX = 4;
+                        if (g_hBtnFirstPage) MoveWindow(g_hBtnFirstPage, startX, 2, 36, 21, TRUE);
+                        if (g_hBtnPrevPage)  MoveWindow(g_hBtnPrevPage,  startX + 40, 2, 80, 21, TRUE);
+                        if (g_hStaticPageInfo) MoveWindow(g_hStaticPageInfo, startX + 124, 4, 130, 18, TRUE);
+                        if (g_hBtnNextPage)  MoveWindow(g_hBtnNextPage,  startX + 258, 2, 80, 21, TRUE);
+                        if (g_hBtnLastPage)  MoveWindow(g_hBtnLastPage,  startX + 342, 2, 36, 21, TRUE);
+                    }
+                } else {
+                    MoveWindow(g_hListView, webViewW, contentTop, listW, contentH, TRUE);
+                    ShowWindow(g_hPaginationBar, SW_HIDE);
+                }
+            } else {
+                if (g_hPaginationBar) ShowWindow(g_hPaginationBar, SW_HIDE);
+                MoveWindow(g_hListView, webViewW, contentTop, clientW - webViewW, contentH, TRUE);
+            }
             return 0;
         }
         
@@ -5210,8 +6182,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             DWORD total = (DWORD)lParam;
             char statusText[128];
 
-            if (g_hListView) {
-                ListView_SetItemCountEx(g_hListView, current, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+            if (g_hListView && g_CurrentViewMode != VIEW_MODE_THUMBNAILS) {
+                ListView_SetItemCountEx(g_hListView, current, LVSICF_NOINVALIDATEALL);
             }
             _snprintf(statusText, sizeof(statusText), "Loading: %lu of %lu objects... (Press Esc to cancel)", current, total);
             statusText[sizeof(statusText) - 1] = '\0';
@@ -5228,9 +6200,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             DWORD c;
 
             SortObjectList(g_SortColumn, FALSE);
-            if (g_hListView) {
-                ListView_SetItemCount(g_hListView, count);
-                InvalidateRect(g_hListView, NULL, TRUE);
+            if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                SetThumbPage(1);
+            } else {
+                if (g_hListView) {
+                    ListView_SetItemCount(g_hListView, count);
+                    if (g_CurrentViewMode == LVS_ICON) {
+                        ListView_Arrange(g_hListView, LVA_DEFAULT);
+                    }
+                    InvalidateRect(g_hListView, NULL, TRUE);
+                }
             }
             EnterCriticalSection(&g_ObjectsCs);
             for (c = 0; c < count; c++) {
@@ -5319,18 +6298,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     break;
                     
                 case ID_TB_VIEWS:
-                    /* Cycle view mode: Large Icons -> Details -> Small Icons -> List */
-                    if (g_CurrentViewMode == LVS_ICON) {
+                    /* Cycle view mode: Thumbnails -> Large Icons -> Details -> Small Icons -> List -> Thumbnails */
+                    if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS) {
+                        SetViewMode(LVS_ICON);
+                    } else if (g_CurrentViewMode == LVS_ICON) {
                         SetViewMode(LVS_REPORT);
                     } else if (g_CurrentViewMode == LVS_REPORT) {
                         SetViewMode(LVS_SMALLICON);
                     } else if (g_CurrentViewMode == LVS_SMALLICON) {
                         SetViewMode(LVS_LIST);
                     } else {
-                        SetViewMode(LVS_ICON);
+                        SetViewMode(VIEW_MODE_THUMBNAILS);
                     }
                     break;
                     
+                case IDM_VIEW_THUMBNAILS:
+                    SetViewMode(VIEW_MODE_THUMBNAILS);
+                    break;
+
                 case IDM_VIEW_LARGE_ICONS:
                     SetViewMode(LVS_ICON);
                     break;
@@ -5444,6 +6429,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     break;
                 }
                     
+                case IDC_BTN_FIRST_PAGE:
+                    SetThumbPage(1);
+                    break;
+
+                case IDC_BTN_PREV_PAGE:
+                    SetThumbPage(g_ThumbCurrentPage - 1);
+                    break;
+
+                case IDC_BTN_NEXT_PAGE:
+                    SetThumbPage(g_ThumbCurrentPage + 1);
+                    break;
+
+                case IDC_BTN_LAST_PAGE:
+                    SetThumbPage(g_ThumbTotalPages);
+                    break;
+
                 case IDM_EDIT_COPY:
                     CopySelectedToClipboard(hWnd);
                     break;
@@ -5461,8 +6462,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     break;
                     
                 case IDM_EDIT_INVERT_SEL: {
+                    int count = ListView_GetItemCount(g_hListView);
                     int idx;
-                    for (idx = 0; idx < (int)g_ObjectCount; idx++) {
+                    for (idx = 0; idx < count; idx++) {
                         UINT state = ListView_GetItemState(g_hListView, idx, LVIS_SELECTED);
                         ListView_SetItemState(g_hListView, idx, (state & LVIS_SELECTED) ? 0 : LVIS_SELECTED, LVIS_SELECTED);
                     }
@@ -5505,7 +6507,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (pnmh->idFrom == IDC_LISTVIEW) {
                 if (pnmh->code == LVN_GETDISPINFOA) {
                     NMLVDISPINFOA *pdi = (NMLVDISPINFOA*)lParam;
-                    int idx = pdi->item.iItem;
+                    int idx = ListViewIndexToObjectIndex(pdi->item.iItem);
 
                     EnterCriticalSection(&g_ObjectsCs);
                     if (g_Objects && idx >= 0 && (DWORD)idx < g_ObjectCount) {
@@ -5560,17 +6562,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         if (pdi->item.mask & LVIF_IMAGE) {
                             if (item->IsFolder) {
                                 pdi->item.iImage = 0;
+                            } else if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS && item->BigThumbIconIndex >= 0) {
+                                pdi->item.iImage = item->BigThumbIconIndex;
+                            } else if (g_CurrentViewMode == LVS_ICON && item->ThumbIconIndex >= 0) {
+                                pdi->item.iImage = item->ThumbIconIndex;
                             } else {
                                 switch (item->Format) {
                                     case MTP_FORMAT_TEXT:          pdi->item.iImage = 1; break;
                                     case MTP_FORMAT_EXIF_JPEG:
-                                    case MTP_FORMAT_PNG:
+                                    case 0x3808: /* MTP_FORMAT_JFIF */
+                                    case 0x3807: /* MTP_FORMAT_GIF */
+                                    case 0x380B: /* MTP_FORMAT_PNG */
+                                    case 0x3802: /* MTP_FORMAT_TIFF_EP */
+                                    case 0x380D: /* MTP_FORMAT_TIFF */
                                     case MTP_FORMAT_BMP:          pdi->item.iImage = 2; break;
                                     case MTP_FORMAT_MP3:
-                                    case MTP_FORMAT_WMA:          pdi->item.iImage = 3; break;
+                                    case MTP_FORMAT_WMA:
+                                    case 0xB902: /* MTP_FORMAT_OGG */
+                                    case 0xB903: /* MTP_FORMAT_AAC */ pdi->item.iImage = 3; break;
                                     case MTP_FORMAT_MP4_CONTAINER:
                                     case MTP_FORMAT_AVI:
-                                    case MTP_FORMAT_WMV:          pdi->item.iImage = 4; break;
+                                    case MTP_FORMAT_WMV:
+                                    case 0x300C: /* MTP_FORMAT_ASF */
+                                    case 0xB984: /* MTP_FORMAT_3GP */ pdi->item.iImage = 4; break;
                                     default:                      pdi->item.iImage = 5; break;
                                 }
                             }
@@ -5584,7 +6598,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     return 0;
                 } else if (pnmh->code == LVN_GETDISPINFOW) {
                     NMLVDISPINFOW *pdi = (NMLVDISPINFOW*)lParam;
-                    int idx = pdi->item.iItem;
+                    int idx = ListViewIndexToObjectIndex(pdi->item.iItem);
 
                     EnterCriticalSection(&g_ObjectsCs);
                     if (g_Objects && idx >= 0 && (DWORD)idx < g_ObjectCount) {
@@ -5639,17 +6653,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         if (pdi->item.mask & LVIF_IMAGE) {
                             if (item->IsFolder) {
                                 pdi->item.iImage = 0;
+                            } else if (g_CurrentViewMode == VIEW_MODE_THUMBNAILS && item->BigThumbIconIndex >= 0) {
+                                pdi->item.iImage = item->BigThumbIconIndex;
+                            } else if (g_CurrentViewMode == LVS_ICON && item->ThumbIconIndex >= 0) {
+                                pdi->item.iImage = item->ThumbIconIndex;
                             } else {
                                 switch (item->Format) {
                                     case MTP_FORMAT_TEXT:          pdi->item.iImage = 1; break;
                                     case MTP_FORMAT_EXIF_JPEG:
-                                    case MTP_FORMAT_PNG:
+                                    case 0x3808: /* MTP_FORMAT_JFIF */
+                                    case 0x3807: /* MTP_FORMAT_GIF */
+                                    case 0x380B: /* MTP_FORMAT_PNG */
+                                    case 0x3802: /* MTP_FORMAT_TIFF_EP */
+                                    case 0x380D: /* MTP_FORMAT_TIFF */
                                     case MTP_FORMAT_BMP:          pdi->item.iImage = 2; break;
                                     case MTP_FORMAT_MP3:
-                                    case MTP_FORMAT_WMA:          pdi->item.iImage = 3; break;
+                                    case MTP_FORMAT_WMA:
+                                    case 0xB902: /* MTP_FORMAT_OGG */
+                                    case 0xB903: /* MTP_FORMAT_AAC */ pdi->item.iImage = 3; break;
                                     case MTP_FORMAT_MP4_CONTAINER:
                                     case MTP_FORMAT_AVI:
-                                    case MTP_FORMAT_WMV:          pdi->item.iImage = 4; break;
+                                    case MTP_FORMAT_WMV:
+                                    case 0x300C: /* MTP_FORMAT_ASF */
+                                    case 0xB984: /* MTP_FORMAT_3GP */ pdi->item.iImage = 4; break;
                                     default:                      pdi->item.iImage = 5; break;
                                 }
                             }
@@ -5665,12 +6691,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     /* Double click on an item */
                     int selIndex = ListView_GetNextItem(g_hListView, -1, LVNI_SELECTED);
                     if (selIndex != -1) {
+                        int objIdx = ListViewIndexToObjectIndex(selIndex);
                         OBJECT_ITEM itemCopy;
                         BOOL found = FALSE;
 
                         EnterCriticalSection(&g_ObjectsCs);
-                        if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-                            itemCopy = g_Objects[selIndex];
+                        if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+                            itemCopy = g_Objects[objIdx];
                             found = TRUE;
                         }
                         LeaveCriticalSection(&g_ObjectsCs);
@@ -5719,12 +6746,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     if (pnkd->wVKey == VK_RETURN) {
                         int selIndex = ListView_GetNextItem(g_hListView, -1, LVNI_SELECTED);
                         if (selIndex != -1) {
+                            int objIdx = ListViewIndexToObjectIndex(selIndex);
                             OBJECT_ITEM itemCopy;
                             BOOL found = FALSE;
 
                             EnterCriticalSection(&g_ObjectsCs);
-                            if (g_Objects && (DWORD)selIndex < g_ObjectCount) {
-                                itemCopy = g_Objects[selIndex];
+                            if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+                                itemCopy = g_Objects[objIdx];
                                 found = TRUE;
                             }
                             LeaveCriticalSection(&g_ObjectsCs);
@@ -5753,10 +6781,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         isImg = FALSE;
 
                         if (selIdx != -1) {
+                            int objIdx = ListViewIndexToObjectIndex(selIdx);
                             EnterCriticalSection(&g_ObjectsCs);
-                            if (g_Objects && (DWORD)selIdx < g_ObjectCount) {
-                                handle = g_Objects[selIdx].Handle;
-                                isImg = IsImageObject(&g_Objects[selIdx]);
+                            if (g_Objects && objIdx >= 0 && (DWORD)objIdx < g_ObjectCount) {
+                                handle = g_Objects[objIdx].Handle;
+                                isImg = IsImageObject(&g_Objects[objIdx]);
                             }
                             LeaveCriticalSection(&g_ObjectsCs);
                         }
@@ -5788,11 +6817,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_DESTROY:
             InterlockedExchange(&g_CancelPreview, 1);
             KillTimer(hWnd, TIMER_PREVIEW_DEBOUNCE);
+            KillTimer(hWnd, TIMER_THUMB_SCROLL_DEBOUNCE);
             if (g_hPreviewThread) {
                 WaitForSingleObject(g_hPreviewThread, 300);
                 CloseHandle(g_hPreviewThread);
                 g_hPreviewThread = NULL;
             }
+            StopThumbnailLoader();
+            ResetLargeImageListThumbs();
             ClearPreviewCache();
             KillTimer(hWnd, TIMER_DEVICE_CHECK);
             RemoveTaskbarNotification(hWnd);
@@ -5802,6 +6834,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             if (g_hLargeImageList) ImageList_Destroy(g_hLargeImageList);
             if (g_hSmallImageList) ImageList_Destroy(g_hSmallImageList);
+            if (g_hThumbImageList) ImageList_Destroy(g_hThumbImageList);
             PostQuitMessage(0);
             return 0;
     }

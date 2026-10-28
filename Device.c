@@ -140,6 +140,7 @@ MtpEvtIoDeviceControl(
          * bulk pipes to recover from desynchronized pipe state. */
         WDFDEVICE device = WdfRequestGetDevice(Request);
         PDEVICE_CONTEXT ctx = DeviceGetContext(device);
+        MtpResetStreaming();
         if (ctx && ctx->UsbPresent) {
             if (ctx->BulkInPipe) MtpUsb_ResetPipe(device, ctx->BulkInPipe);
             if (ctx->BulkOutPipe) MtpUsb_ResetPipe(device, ctx->BulkOutPipe);

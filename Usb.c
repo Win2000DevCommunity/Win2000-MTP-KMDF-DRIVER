@@ -34,7 +34,7 @@ MtpUsb_PrepareHardware(WDFDEVICE Device)
     // Default configuration
     ctx->UsbConfig.ReadBufferSize = 16384;
     ctx->UsbConfig.NumReaders = 2;
-    ctx->UsbConfig.TransferTimeoutMs = 15000;
+    ctx->UsbConfig.TransferTimeoutMs = 6000;
     ctx->UsbConfig.RetryCount = 3;
 
     // Create USB device object if not already created
@@ -174,7 +174,7 @@ MtpUsb_WriteBulk(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 15000;
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 6000;
 
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)Length);
 
@@ -278,7 +278,7 @@ MtpUsb_ReadBulk(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 15000;
+    timeout = ctx->UsbConfig.TransferTimeoutMs ? ctx->UsbConfig.TransferTimeoutMs : 6000;
 
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&memDesc, Buffer, (ULONG)BufferLength);
 
@@ -301,6 +301,17 @@ MtpUsb_ReadBulk(
          * Do NOT reset on timeouts — that corrupts the DATA0/DATA1 toggle. */
         if (status == STATUS_IO_DEVICE_ERROR || status == STATUS_SHARING_VIOLATION) {
             WdfUsbTargetPipeResetSynchronously(Pipe, NULL, NULL);
+            /* Drain any PTP response container emitted by device after clear-halt */
+            {
+                UCHAR drainBuf[64];
+                ULONG drainBytes = 0;
+                WDF_MEMORY_DESCRIPTOR drainDesc;
+                WDF_REQUEST_SEND_OPTIONS drainOpts;
+                WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&drainDesc, drainBuf, sizeof(drainBuf));
+                WDF_REQUEST_SEND_OPTIONS_INIT(&drainOpts, 0);
+                WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&drainOpts, WDF_REL_TIMEOUT_IN_MS(300));
+                WdfUsbTargetPipeReadSynchronously(Pipe, NULL, &drainOpts, &drainDesc, &drainBytes);
+            }
         }
     }
 

@@ -34,6 +34,7 @@ if (Test-Path $hostPhoneStorage) {
 Copy-Item "$workspaceRoot\user_app\mtp_gui.exe" "$qemuStaging\"
 Copy-Item "$workspaceRoot\user_app\mtp_gui_debug.exe" "$qemuStaging\"
 Copy-Item "$workspaceRoot\test_app\mtp_test.exe" "$qemuStaging\"
+Copy-Item "$workspaceRoot\user_app\mtp_transfer.exe" "$qemuStaging\"
 Copy-Item "$workspaceRoot\Release\MTP_DRIVE.REG" "$qemuStaging\"
 Copy-Item "$workspaceRoot\Release\DISABLE_SIGNING.REG" "$qemuStaging\"
 
@@ -223,7 +224,7 @@ A complete, production-ready Windows 2000 Professional SP4 MTP & PTP driver pack
 ## Package Contents
 - **`Driver/`**: ``mtp.sys``, ``mtp.inf``, ``WdfCoInstaller01009.dll``
 - **`Applications/`**:
-  - ``mtp_gui.exe``: Native Windows 2000 Explorer-style MTP file manager with Web View sidebar, Address bar, Large Icons view, and live preview pane.
+  - ``mtp_gui.exe``: Native Windows 2000 Explorer-style MTP file manager with Web View sidebar, Address bar, Thumbnails view, Large Icons view, and live photo preview.
   - ``mtp_test.exe``: CLI diagnostic tool testing kernel IOCTL communication.
   - ``mtp_transfer.exe``: Command-line scriptable file transfer utility.
 - **`KMDF-1.9-Runtime/`**: Official Microsoft KMDF 1.9 installer package (``KB970158``).

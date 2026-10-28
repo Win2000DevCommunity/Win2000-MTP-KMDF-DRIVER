@@ -1158,6 +1158,8 @@ MtpSendOperationAndReceiveData(
 
     if (Opcode == 0x1007 || Opcode == 0x9805) {
         readBufSize = 262144; /* 256 KB for large object handle lists */
+    } else if (Opcode == 0x9107 || Opcode == 0x9807 || Opcode == 0x100A || Opcode == 0x101B) {
+        readBufSize = 131072; /* 128 KB for partial object / thumbnail reads */
     } else {
         readBufSize = 4096;   /* 4 KB fits in 1 physical page; prevents NonPagedPool fragmentation on Win2K */
     }
@@ -1489,12 +1491,15 @@ MtpOperation(WDFREQUEST Request)
         case 0x1014: maxParams = 1; break; /* GetDevicePropDesc */
         case 0x1015: maxParams = 1; break; /* GetDevicePropValue */
         case 0x1016: maxParams = 1; break; /* SetDevicePropValue */
+        case 0x101B: maxParams = 3; break; /* PTP GetPartialObject */
+        case 0x9107: maxParams = 3; break; /* MTP GetPartialObject: Handle, Offset, MaxBytes */
         case 0x9801: maxParams = 1; break; /* GetObjectPropsSupported */
         case 0x9802: maxParams = 2; break; /* GetObjectPropDesc */
         case 0x9803: maxParams = 2; break; /* GetObjectPropValue */
         case 0x9804: maxParams = 2; break; /* SetObjectPropValue */
         case 0x9805: maxParams = 5; break; /* GetObjectPropList */
         case 0x9806: maxParams = 0; break; /* SetObjectPropList */
+        case 0x9807: maxParams = 4; break; /* MTP GetPartialObject64 */
         default:     maxParams = 5; break;
     }
 
@@ -1692,6 +1697,27 @@ MtpOperation(WDFREQUEST Request)
                 if (NT_SUCCESS(status)) {
                     size_t toCopy = (objGet->Size < outCap) ? objGet->Size : outCap;
                     RtlCopyMemory(outBuf, objGet->Data, toCopy);
+                    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, toCopy);
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+
+        if ((opcode == 0x9107 || opcode == 0x101B) && paramCount >= 3 && !g_bRealDevicePresent) {
+            /* GetPartialObject fallback: only use fake catalog when no real device */
+            PMTP_OBJECT objPart = MtpFindObject(params[0]);
+            if (objPart && objPart->Data && objPart->Size > 0) {
+                status = WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outCap);
+                if (NT_SUCCESS(status)) {
+                    ULONG reqOff = params[1];
+                    ULONG reqLen = params[2];
+                    ULONG toCopy = 0;
+                    if (reqOff < objPart->Size) {
+                        toCopy = objPart->Size - reqOff;
+                        if (toCopy > reqLen) toCopy = reqLen;
+                        if (toCopy > (ULONG)outCap) toCopy = (ULONG)outCap;
+                        RtlCopyMemory(outBuf, (PUCHAR)objPart->Data + reqOff, toCopy);
+                    }
                     WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, toCopy);
                     return STATUS_SUCCESS;
                 }
